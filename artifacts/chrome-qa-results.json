@@ -1,0 +1,23 @@
+{
+  "viewport": {
+    "width": 950,
+    "height": 664
+  },
+  "interactions": [
+    "Get Started",
+    "Visualize mode",
+    "Guide mode",
+    "Prompt entry",
+    "Prompt submit",
+    "Backend response",
+    "TTS control"
+  ],
+  "state": {
+    "title": "Projectile motion",
+    "mode": "Guide",
+    "backend": "Local backend",
+    "overflowX": false,
+    "overflowY": false
+  },
+  "consoleErrors": []
+}
