@@ -8,7 +8,7 @@ export default defineConfig({
     allowedHosts: ["terminal.local"],
     proxy: {
       "/api": "http://127.0.0.1:8787",
+      "/renders": "http://127.0.0.1:8787",
     },
   },
 });
-

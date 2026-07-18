@@ -3,4 +3,5 @@ node_modules/
 dist/
 .vite/
 .env*
-artifacts/*profile*/
+artifacts/*
+renders/

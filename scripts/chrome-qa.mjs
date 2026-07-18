@@ -105,25 +105,27 @@ try {
   await delay(350);
   await screenshot("tutor-empty-950x664.png");
 
-  await evaluate("document.querySelectorAll('.mode-switcher button')[2]?.click()");
-  await waitFor("document.querySelector('.mode-switcher button.active')?.textContent?.includes('Visualize')");
+  await evaluate("document.querySelectorAll('.mode-switcher button')[1]?.click()");
+  await waitFor("document.querySelector('.mode-switcher button.active')?.textContent?.includes('Guide')");
+  await evaluate("document.querySelector('.voice-button')?.click()");
+  await delay(250);
 
   await evaluate(`(() => {
-    const guide = document.querySelectorAll('.mode-switcher button')[1];
-    guide?.click();
+    document.querySelectorAll('.mode-switcher button')[2]?.click();
     const input = document.querySelector('#physics-prompt');
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-    setter.call(input, 'Why does a ball follow a curved path?');
+    setter.call(input, 'A blue ball drops onto a floor and bounces once.');
     input.dispatchEvent(new Event('input', { bubbles: true }));
     return true;
   })()`);
-  await waitFor("document.querySelector('#physics-prompt')?.value.includes('curved path')");
+  await waitFor("document.querySelector('.mode-switcher button.active')?.textContent?.includes('Visualize')");
+  await waitFor("document.querySelector('#physics-prompt')?.value.includes('bounces once')");
   await evaluate("document.querySelector('.prompt-form')?.requestSubmit()");
-  await waitFor("document.querySelector('.output-copy h1')?.textContent === 'Projectile motion'");
-  await delay(300);
-  await screenshot("tutor-response-950x664.png");
-  await evaluate("document.querySelector('.voice-button')?.click()");
-  await delay(250);
+  await waitFor("Boolean(document.querySelector('.animation-card video'))", 120000);
+  await waitFor("document.querySelector('.animation-card video')?.readyState >= 1", 15000);
+  await evaluate("document.querySelector('.animation-card')?.scrollIntoView({ block: 'center' })");
+  await delay(500);
+  await screenshot("tutor-animation-950x664.png");
 
   const state = await evaluate(`({
     title: document.querySelector('.output-copy h1')?.textContent,
@@ -135,7 +137,7 @@ try {
 
   await writeFile(path.join(artifacts, "chrome-qa-results.json"), JSON.stringify({
     viewport: { width: 950, height: 664 },
-    interactions: ["Get Started", "Visualize mode", "Guide mode", "Prompt entry", "Prompt submit", "Backend response", "TTS control"],
+    interactions: ["Get Started", "Guide mode", "TTS control", "Visualize mode", "Prompt entry", "Prompt submit", "MotionForge job", "Rendered video playback"],
     state,
     consoleErrors,
   }, null, 2));

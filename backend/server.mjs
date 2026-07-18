@@ -1,6 +1,16 @@
 import { createServer } from "node:http";
+import { createReadStream, existsSync } from "node:fs";
+import { mkdir, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 const port = Number(process.env.VELO_API_PORT || 8787);
+const projectRoot = process.cwd();
+const rendersRoot = path.join(projectRoot, "renders");
+const motionForgeExecutable = process.env.MOTIONFORGE_EXECUTABLE || path.resolve(projectRoot, "..", "MotionForge", "dist", "prompt-animator.exe");
+const motionForgeModel = process.env.MOTIONFORGE_MODEL || "gpt-oss:120b-cloud";
+const animationJobs = new Map();
 
 const concepts = [
   {
@@ -79,7 +89,7 @@ function localResponse(prompt, mode) {
 async function ollamaResponse(prompt, mode) {
   if (process.env.VELO_PROVIDER !== "ollama") return null;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6500);
+  const timer = setTimeout(() => controller.abort(), Number(process.env.OLLAMA_TIMEOUT_MS || 60000));
   try {
     const response = await fetch(`${process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434"}/api/chat`, {
       method: "POST",
@@ -119,6 +129,114 @@ function send(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
+function publicJob(job) {
+  return {
+    id: job.id,
+    status: job.status,
+    stage: job.stage,
+    error: job.error,
+    videoUrl: job.status === "complete" ? `/renders/${job.id}/animation.mp4` : null,
+    createdAt: job.createdAt,
+  };
+}
+
+async function startAnimation(prompt) {
+  if (!existsSync(motionForgeExecutable)) {
+    throw new Error(`MotionForge executable was not found at ${motionForgeExecutable}`);
+  }
+
+  const id = randomUUID();
+  const jobDirectory = path.join(rendersRoot, id);
+  const outputBase = path.join(jobDirectory, "animation");
+  const outputFile = `${outputBase}.mp4`;
+  await mkdir(jobDirectory, { recursive: true });
+
+  const job = {
+    id,
+    status: "queued",
+    stage: "Starting MotionForge…",
+    error: null,
+    outputFile,
+    createdAt: new Date().toISOString(),
+    logs: [],
+  };
+  animationJobs.set(id, job);
+
+  const animationPrompt = `Create a clear, short educational physics animation for this request: ${prompt}. Use a white background, readable labels, physically plausible values, a duration of 2 to 3 seconds, and simple primitive shapes.`;
+  const child = spawn(motionForgeExecutable, [
+    animationPrompt,
+    "--provider", "ollama",
+    "--model", motionForgeModel,
+    "--quality", "low",
+    "--output", outputBase,
+  ], {
+    cwd: jobDirectory,
+    windowsHide: true,
+    env: process.env,
+  });
+
+  job.status = "running";
+  const handleOutput = (chunk) => {
+    const text = chunk.toString();
+    job.logs.push(text);
+    if (job.logs.length > 60) job.logs.shift();
+    if (text.includes("[1/4]")) job.stage = "Designing the scene…";
+    if (text.includes("[2/4]")) job.stage = "Simulating the physics…";
+    if (text.includes("[3/4]")) job.stage = "Building the timeline…";
+    if (text.includes("[4/4]")) job.stage = "Rendering the animation…";
+  };
+  child.stdout.on("data", handleOutput);
+  child.stderr.on("data", handleOutput);
+
+  child.on("error", (error) => {
+    job.status = "failed";
+    job.stage = "Animation failed";
+    job.error = error.message;
+  });
+  child.on("exit", (code) => {
+    if (code === 0 && existsSync(outputFile)) {
+      job.status = "complete";
+      job.stage = "Animation ready";
+      return;
+    }
+    job.status = "failed";
+    job.stage = "Animation failed";
+    job.error = `MotionForge exited with code ${code}. ${job.logs.join(" ").slice(-1200)}`;
+  });
+
+  return job;
+}
+
+async function serveVideo(request, response, filePath) {
+  const details = await stat(filePath);
+  const range = request.headers.range;
+  if (!range) {
+    response.writeHead(200, {
+      "content-type": "video/mp4",
+      "content-length": details.size,
+      "accept-ranges": "bytes",
+      "cache-control": "no-store",
+    });
+    return createReadStream(filePath).pipe(response);
+  }
+
+  const [startText, endText] = range.replace("bytes=", "").split("-");
+  const start = Number(startText);
+  const end = endText ? Number(endText) : details.size - 1;
+  if (!Number.isFinite(start) || start < 0 || end >= details.size || start > end) {
+    response.writeHead(416, { "content-range": `bytes */${details.size}` });
+    return response.end();
+  }
+  response.writeHead(206, {
+    "content-type": "video/mp4",
+    "content-length": end - start + 1,
+    "content-range": `bytes ${start}-${end}/${details.size}`,
+    "accept-ranges": "bytes",
+    "cache-control": "no-store",
+  });
+  return createReadStream(filePath, { start, end }).pipe(response);
+}
+
 createServer(async (request, response) => {
   if (request.method === "OPTIONS") return send(response, 204, {});
   if (request.method === "GET" && request.url === "/api/health") {
@@ -137,8 +255,35 @@ createServer(async (request, response) => {
       return send(response, 400, { error: "The request could not be read." });
     }
   }
+  if (request.method === "POST" && request.url === "/api/animations") {
+    try {
+      const body = await readJson(request);
+      const prompt = String(body.prompt || "").trim();
+      if (!prompt) return send(response, 400, { error: "Please enter an animation prompt." });
+      if (prompt.length > 2000) return send(response, 400, { error: "Please keep the prompt under 2,000 characters." });
+      const job = await startAnimation(prompt);
+      return send(response, 202, publicJob(job));
+    } catch (error) {
+      return send(response, 500, { error: error.message || "The animation could not be started." });
+    }
+  }
+  const jobMatch = request.url?.match(/^\/api\/animations\/([0-9a-f-]+)$/i);
+  if (request.method === "GET" && jobMatch) {
+    const job = animationJobs.get(jobMatch[1]);
+    if (!job) return send(response, 404, { error: "Animation job not found." });
+    return send(response, 200, publicJob(job));
+  }
+  const videoMatch = request.url?.match(/^\/renders\/([0-9a-f-]+)\/animation\.mp4$/i);
+  if (request.method === "GET" && videoMatch) {
+    const job = animationJobs.get(videoMatch[1]);
+    if (!job || job.status !== "complete" || !existsSync(job.outputFile)) return send(response, 404, { error: "Animation not found." });
+    try {
+      return await serveVideo(request, response, job.outputFile);
+    } catch {
+      return send(response, 500, { error: "The animation could not be read." });
+    }
+  }
   return send(response, 404, { error: "Not found" });
 }).listen(port, "127.0.0.1", () => {
   console.log(`Velo API ready at http://127.0.0.1:${port}`);
 });
-
