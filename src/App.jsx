@@ -9,9 +9,11 @@ import {
   Lightbulb,
   PaperPlaneTilt,
   Pause,
+  Moon,
   SpeakerHigh,
   Sparkle,
   SpinnerGap,
+  Sun,
   WarningCircle,
   Waveform,
 } from "@phosphor-icons/react";
@@ -28,7 +30,16 @@ const starters = [
   "Guide me through conservation of energy",
 ];
 
-function Home({ onStart }) {
+function ThemeToggle({ theme, onToggle }) {
+  const isDark = theme === "dark";
+  return (
+    <button className="theme-toggle" onClick={onToggle} aria-label={isDark ? "Switch to light theme" : "Switch to dark theme"} title={isDark ? "Switch to light theme" : "Switch to dark theme"}>
+      {isDark ? <Sun weight="fill" /> : <Moon weight="fill" />}
+    </button>
+  );
+}
+
+function Home({ onStart, theme, onToggleTheme }) {
   return (
     <main className="home-screen">
       <nav className="home-nav" aria-label="Welcome navigation">
@@ -36,7 +47,10 @@ function Home({ onStart }) {
           <span className="brand-icon"><Atom weight="duotone" /></span>
           <span>Velo</span>
         </a>
-        <button className="nav-start" onClick={onStart}>Open tutor <ArrowRight weight="bold" /></button>
+        <div className="home-actions">
+          <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+          <button className="nav-start" onClick={onStart}>Open tutor <ArrowRight weight="bold" /></button>
+        </div>
       </nav>
 
       <section className="hero" id="top">
@@ -56,7 +70,7 @@ function Home({ onStart }) {
   );
 }
 
-function Tutor({ onBack }) {
+function Tutor({ onBack, theme, onToggleTheme }) {
   const [mode, setMode] = useState("explain");
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
@@ -155,7 +169,10 @@ function Tutor({ onBack }) {
         <a className="brand compact" href="#" onClick={(event) => { event.preventDefault(); onBack(); }}>
           <span className="brand-icon"><Atom weight="duotone" /></span><span>Velo</span>
         </a>
-        <div className={`backend-state ${backendOnline ? "online" : "offline"}`}><span />{backendOnline ? "Local backend" : "Reconnecting"}</div>
+        <div className="header-actions">
+          <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+          <div className={`backend-state ${backendOnline ? "online" : "offline"}`}><span />{backendOnline ? "Local backend" : "Reconnecting"}</div>
+        </div>
       </header>
 
       <div className="tutor-body">
@@ -227,5 +244,16 @@ function Tutor({ onBack }) {
 
 export default function App() {
   const [started, setStarted] = useState(false);
-  return started ? <Tutor onBack={() => setStarted(false)} /> : <Home onStart={() => setStarted(true)} />;
+  const [theme, setTheme] = useState(() => localStorage.getItem("velo-theme") || "light");
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("velo-theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme((currentTheme) => currentTheme === "dark" ? "light" : "dark");
+
+  return started
+    ? <Tutor onBack={() => setStarted(false)} theme={theme} onToggleTheme={toggleTheme} />
+    : <Home onStart={() => setStarted(true)} theme={theme} onToggleTheme={toggleTheme} />;
 }
