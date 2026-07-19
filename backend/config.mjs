@@ -28,7 +28,7 @@ export function loadConfig(env = process.env, root = process.cwd()) {
     dataDir,
     rendersRoot: path.join(dataDir, "renders"),
     databasePath: path.join(dataDir, "velo.sqlite"),
-    motionForgeExecutable: env.MOTIONFORGE_EXECUTABLE || path.resolve(root, "..", "MotionForge", "dist", "prompt-animator.exe"),
+    motionForgeExecutable: env.MOTIONFORGE_EXECUTABLE || path.resolve(root, "..", "MotionForge", "dist", "prompt-animator", "prompt-animator.exe"),
     motionForgeModel: env.MOTIONFORGE_MODEL || "gpt-oss:120b-cloud",
     renderConcurrency: positiveInteger(env.VELO_RENDER_CONCURRENCY, 1, "VELO_RENDER_CONCURRENCY", 8),
     compileTimeoutMs: positiveInteger(env.VELO_COMPILE_TIMEOUT_MS, 120000, "VELO_COMPILE_TIMEOUT_MS"),
