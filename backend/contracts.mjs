@@ -72,6 +72,23 @@ export function validateGuideMessage(value) {
   return result(value, issues);
 }
 
+export function validateGuideSessionRequest(value) {
+  const issues = [];
+  if (!isRecord(value)) return result(value, [issue("body", "must be an object")]);
+  if (!isString(value.prompt?.trim(), { min: 1, max: 2000 })) issues.push(issue("prompt", "must be 1–2,000 characters"));
+  if (value.learnerLevel !== undefined && !["simpler", "current", "technical"].includes(value.learnerLevel)) issues.push(issue("learnerLevel", "must be simpler, current, or technical"));
+  return result({ prompt: value.prompt?.trim(), learnerLevel: value.learnerLevel || "current" }, issues);
+}
+
+export function validateGuideMessageRequest(value) {
+  const issues = [];
+  if (!isRecord(value)) return result(value, [issue("body", "must be an object")]);
+  if (value.answer !== undefined && !isString(value.answer, { max: 2000 })) issues.push(issue("answer", "must be under 2,000 characters"));
+  if (value.action !== undefined && !["answer", "hint", "explain", "skip", "visual"].includes(value.action)) issues.push(issue("action", "is not recognised"));
+  if ((value.action || "answer") === "answer" && !isString(value.answer?.trim(), { min: 1, max: 2000 })) issues.push(issue("answer", "must be a non-empty response"));
+  return result({ answer: value.answer?.trim() || "", action: value.action || "answer" }, issues);
+}
+
 export function validateVisualizationJob(value) {
   const issues = !isRecord(value) ? [issue("body", "must be an object")] : versionIssues(value);
   if (!isRecord(value)) return result(value, issues);
