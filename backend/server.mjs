@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { loadConfig } from "./config.mjs";
-import { validateChatRequest, validateVisualizationJob, requireValid } from "./contracts.mjs";
+import { validateChatRequest, validateExplainRequest, validateVisualizationJob, requireValid } from "./contracts.mjs";
+import { ExplainService } from "./explain-service.mjs";
 import { VeloError, errorPayload, toVeloError } from "./errors.mjs";
 import { AnimationJobManager } from "./job-manager.mjs";
 import { createLogger } from "./logger.mjs";
@@ -51,6 +52,7 @@ async function serveVideo(request, response, filePath) {
 
 export function createVeloServer({ config = loadConfig(), provider = createProvider(config), log = createLogger(), jobManager } = {}) {
   const jobs = jobManager || new AnimationJobManager(config, { log });
+  const explain = new ExplainService(config, { provider, log });
   const providerHealth = { checkedAt: null, result: null };
   async function refreshProviderHealth() {
     try { providerHealth.result = await provider.health(); }
@@ -70,6 +72,16 @@ export function createVeloServer({ config = loadConfig(), provider = createProvi
         catch (error) { if (provider.name !== "ollama") throw error; log("warn", "provider_fallback", { requestId, code: toVeloError(error).code }); modelResult = await createProvider({ provider: "local" }).generateText({ prompt, mode }); }
         return send(response, 200, { contractVersion: 1, ...modelResult, mode, provider: provider.name, receivedAt: new Date().toISOString() }, requestId);
       }
+      if (request.method === "POST" && url.pathname === "/api/explain/stream") {
+        const input = requireValid(validateExplainRequest(await readJson(request)), "Please enter a physics question between 1 and 2,000 characters.");
+        const { sessionId, response: explanation } = await explain.create(input);
+        response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "connection": "keep-alive", "x-request-id": requestId });
+        const emit = (event, payload) => response.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+        emit("meta", { contractVersion: 1, sessionId, title: explanation.title, summary: explanation.summary, visualSuggestion: explanation.visualSuggestion });
+        for (const section of explanation.sections) emit("section", section);
+        emit("complete", { checkQuestion: explanation.checkQuestion, spokenText: explanation.spokenText });
+        return response.end();
+      }
       if (request.method === "POST" && url.pathname === "/api/animations") {
         const { prompt } = requireValid(validateChatRequest(await readJson(request)), "Please enter an animation prompt between 1 and 2,000 characters.");
         return send(response, 202, publicJob(jobs.create(prompt)), requestId);
@@ -88,7 +100,7 @@ export function createVeloServer({ config = loadConfig(), provider = createProvi
       return send(response, safe.status, errorPayload(safe, requestId), requestId);
     } finally { log("info", "request_complete", { requestId, method: request.method, pathname: request.url, durationMs: Date.now() - startedAt }); }
   });
-  return { server, config, provider, jobs, refreshProviderHealth, close: () => jobs.close() };
+  return { server, config, provider, jobs, explain, refreshProviderHealth, close: () => { jobs.close(); explain.close(); } };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

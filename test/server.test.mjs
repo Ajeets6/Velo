@@ -61,3 +61,12 @@ test("invalid requests use stable error envelopes and request IDs", async () => 
   assert.match(body.error.requestId, /^[0-9a-f-]{36}$/);
   assert.equal(response.headers.get("x-request-id"), body.error.requestId);
 }));
+
+test("Explain stream returns metadata, structured sections, and completion speech", async () => withServer(async (base) => {
+  const response = await fetch(`${base}/api/explain/stream`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "Explain orbit simply", learnerLevel: "simpler" }) });
+  const body = await response.text();
+  assert.equal(response.headers.get("content-type").includes("text/event-stream"), true);
+  assert.match(body, /event: meta/);
+  assert.match(body, /event: section/);
+  assert.match(body, /event: complete/);
+}));

@@ -26,6 +26,15 @@ export function validateChatRequest(value) {
   return result({ prompt: value.prompt?.trim(), mode: value.mode || "explain" }, issues);
 }
 
+export function validateExplainRequest(value) {
+  const base = validateChatRequest({ ...value, mode: "explain" });
+  if (!base.ok) return base;
+  const issues = [];
+  if (value.sessionId !== undefined && !isString(value.sessionId, { min: 1, max: 100 })) issues.push(issue("sessionId", "must be a short string"));
+  if (value.learnerLevel !== undefined && !["simpler", "current", "technical"].includes(value.learnerLevel)) issues.push(issue("learnerLevel", "must be simpler, current, or technical"));
+  return result({ prompt: base.value.prompt, sessionId: value.sessionId, learnerLevel: value.learnerLevel || "current" }, issues);
+}
+
 export function validateExplainResponse(value) {
   const issues = !isRecord(value) ? [issue("body", "must be an object")] : versionIssues(value);
   if (!isRecord(value)) return result(value, issues);
