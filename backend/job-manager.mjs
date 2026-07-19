@@ -45,12 +45,15 @@ export class AnimationJobManager {
   migrate() {
     this.db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS animation_jobs (
-        id TEXT PRIMARY KEY, prompt_hash TEXT NOT NULL, status TEXT NOT NULL, stage TEXT NOT NULL,
+        id TEXT PRIMARY KEY, prompt_hash TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL, stage TEXT NOT NULL,
         error_code TEXT, error_message TEXT, output_path TEXT NOT NULL, output_size INTEGER,
         created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL, cleanup_after TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS animation_jobs_queue ON animation_jobs(status, created_at);`);
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?)").run(timestamp());
+    const columns = this.db.prepare("PRAGMA table_info(animation_jobs)").all().map((column) => column.name);
+    if (!columns.includes("prompt")) this.db.exec("ALTER TABLE animation_jobs ADD COLUMN prompt TEXT NOT NULL DEFAULT ''");
+    this.db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)").run(timestamp());
   }
 
   recoverInterrupted() {
@@ -74,10 +77,15 @@ export class AnimationJobManager {
   publicJob(row) {
     if (!row) return null;
     const queuePosition = row.status === "queued" ? this.db.prepare("SELECT COUNT(*) AS count FROM animation_jobs WHERE status = 'queued' AND created_at < ?").get(row.created_at).count + 1 : null;
-    return { id: row.id, status: row.status, stage: row.stage, error: row.error_code ? { code: row.error_code, message: row.error_message } : null, videoUrl: row.status === "complete" ? `/renders/${row.id}/animation.mp4` : null, createdAt: row.created_at, queuePosition };
+    return { id: row.id, prompt: row.prompt, status: row.status, stage: row.stage, error: row.error_code ? { code: row.error_code, message: row.error_message } : null, videoUrl: row.status === "complete" ? `/renders/${row.id}/animation.mp4` : null, createdAt: row.created_at, queuePosition };
   }
 
   get(id) { return this.publicJob(this.row(id)); }
+
+  list({ limit = 20, offset = 0 } = {}) {
+    const rows = this.db.prepare("SELECT * FROM animation_jobs ORDER BY created_at DESC LIMIT ? OFFSET ?").all(limit, offset);
+    return rows.map((row) => this.publicJob(row));
+  }
 
   update(id, fields) {
     const values = { ...fields, updated_at: timestamp() };
@@ -90,7 +98,7 @@ export class AnimationJobManager {
     const outputPath = managedPath(this.config.rendersRoot, path.join(this.config.rendersRoot, id, "animation.mp4"));
     const time = timestamp();
     const hash = createHash("sha256").update(prompt).digest("hex");
-    this.db.prepare("INSERT INTO animation_jobs(id, prompt_hash, status, stage, output_path, created_at, updated_at, cleanup_after) VALUES (?, ?, 'queued', 'Queued for rendering', ?, ?, ?, ?)").run(id, hash, outputPath, time, time, new Date(Date.now() + this.config.cleanupAfterHours * 3600000).toISOString());
+    this.db.prepare("INSERT INTO animation_jobs(id, prompt_hash, prompt, status, stage, output_path, created_at, updated_at, cleanup_after) VALUES (?, ?, ?, 'queued', 'Queued for rendering', ?, ?, ?, ?)").run(id, hash, prompt, outputPath, time, time, new Date(Date.now() + this.config.cleanupAfterHours * 3600000).toISOString());
     this.log("info", "animation_queued", { jobId: id });
     this.pendingPrompts.set(id, prompt);
     this.pump();
@@ -174,6 +182,16 @@ export class AnimationJobManager {
     return this.get(id);
   }
 
+  remove(id) {
+    const job = this.row(id);
+    if (!job) throw new VeloError("NOT_FOUND", "Animation job not found.");
+    if (!terminalStatuses.has(job.status)) throw new VeloError("INVALID_REQUEST", "Cancel an active animation before deleting it.", { status: 409 });
+    const directory = managedPath(this.config.rendersRoot, path.dirname(job.output_path));
+    if (existsSync(directory)) rmSync(directory, { recursive: true, force: true });
+    this.db.prepare("DELETE FROM animation_jobs WHERE id = ?").run(id);
+    this.log("info", "animation_deleted", { jobId: id });
+  }
+
   getOutputPath(id) {
     const job = this.row(id);
     if (!job || job.status !== "complete" || !existsSync(job.output_path)) return null;
@@ -185,10 +203,8 @@ export class AnimationJobManager {
     let total = jobs.reduce((sum, job) => sum + (job.output_size || 0), 0);
     for (const job of jobs) {
       if (!(Date.parse(job.cleanup_after) <= referenceTime || total > this.config.maxRenderBytes)) continue;
-      const directory = managedPath(this.config.rendersRoot, path.dirname(job.output_path));
-      if (existsSync(directory)) rmSync(directory, { recursive: true, force: true });
       total -= job.output_size || 0;
-      this.update(job.id, { output_size: null, stage: job.status === "complete" ? "Animation expired" : job.stage });
+      this.remove(job.id);
       this.log("info", "animation_cleaned", { jobId: job.id });
     }
   }

@@ -27,6 +27,14 @@ function publicJob(job) {
   return requireValid(validateVisualizationJob({ contractVersion: 1, ...job }), "The animation job did not match the Velo contract.");
 }
 
+function pageParameters(url) {
+  const limitText = url.searchParams.get("limit") || "20";
+  const offsetText = url.searchParams.get("offset") || "0";
+  const limit = Number(limitText); const offset = Number(offsetText);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50 || !Number.isInteger(offset) || offset < 0) throw new VeloError("INVALID_REQUEST", "limit must be 1–50 and offset must be a non-negative integer.");
+  return { limit, offset };
+}
+
 async function serveVideo(request, response, filePath) {
   const details = await stat(filePath);
   const range = request.headers.range;
@@ -52,23 +60,27 @@ export function createVeloServer({ config = loadConfig(), provider = createProvi
   const server = createServer(async (request, response) => {
     const requestId = randomUUID(); const startedAt = Date.now();
     try {
+      const url = new URL(request.url, "http://127.0.0.1");
       if (request.method === "OPTIONS") return send(response, 204, {}, requestId);
-      if (request.method === "GET" && request.url === "/api/health") return send(response, 200, { contractVersion: 1, ok: true, service: "velo-api", provider: provider.name, providerHealth: await refreshProviderHealth(), checkedAt: providerHealth.checkedAt }, requestId);
-      if (request.method === "POST" && request.url === "/api/chat") {
+      if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { contractVersion: 1, ok: true, service: "velo-api", provider: provider.name, providerHealth: await refreshProviderHealth(), checkedAt: providerHealth.checkedAt }, requestId);
+      if (request.method === "POST" && url.pathname === "/api/chat") {
         const { prompt, mode } = requireValid(validateChatRequest(await readJson(request)), "Please enter a physics question between 1 and 2,000 characters.");
         let modelResult;
         try { modelResult = await provider.generateText({ prompt, mode, requestId }); }
         catch (error) { if (provider.name !== "ollama") throw error; log("warn", "provider_fallback", { requestId, code: toVeloError(error).code }); modelResult = await createProvider({ provider: "local" }).generateText({ prompt, mode }); }
         return send(response, 200, { contractVersion: 1, ...modelResult, mode, provider: provider.name, receivedAt: new Date().toISOString() }, requestId);
       }
-      if (request.method === "POST" && request.url === "/api/animations") {
+      if (request.method === "POST" && url.pathname === "/api/animations") {
         const { prompt } = requireValid(validateChatRequest(await readJson(request)), "Please enter an animation prompt between 1 and 2,000 characters.");
         return send(response, 202, publicJob(jobs.create(prompt)), requestId);
       }
-      const jobMatch = request.url?.match(/^\/api\/animations\/([0-9a-f-]+)$/i);
+      if (request.method === "GET" && url.pathname === "/api/animations") return send(response, 200, { contractVersion: 1, jobs: jobs.list(pageParameters(url)) }, requestId);
+      const jobMatch = url.pathname.match(/^\/api\/animations\/([0-9a-f-]+)$/i);
       if (jobMatch && request.method === "GET") { const job = jobs.get(jobMatch[1]); if (!job) throw new VeloError("NOT_FOUND", "Animation job not found."); return send(response, 200, publicJob(job), requestId); }
-      if (jobMatch && request.method === "DELETE") return send(response, 200, publicJob(jobs.cancel(jobMatch[1])), requestId);
-      const videoMatch = request.url?.match(/^\/renders\/([0-9a-f-]+)\/animation\.mp4$/i);
+      const cancelMatch = url.pathname.match(/^\/api\/animations\/([0-9a-f-]+)\/cancel$/i);
+      if (cancelMatch && request.method === "POST") return send(response, 200, publicJob(jobs.cancel(cancelMatch[1])), requestId);
+      if (jobMatch && request.method === "DELETE") { jobs.remove(jobMatch[1]); return send(response, 204, {}, requestId); }
+      const videoMatch = url.pathname.match(/^\/renders\/([0-9a-f-]+)\/animation\.mp4$/i);
       if (videoMatch && request.method === "GET") { const filePath = jobs.getOutputPath(videoMatch[1]); if (!filePath) throw new VeloError("NOT_FOUND", "Animation not found."); return await serveVideo(request, response, filePath); }
       throw new VeloError("NOT_FOUND", "The requested resource was not found.");
     } catch (error) {

@@ -47,12 +47,23 @@ test("marks timed-out work with a stable error and releases the queue", async ()
 }));
 
 test("recovers interrupted jobs from SQLite on startup", async () => withManager(async ({ manager, config }) => {
-  manager.db.prepare("INSERT INTO animation_jobs(id, prompt_hash, status, stage, output_path, created_at, updated_at, cleanup_after) VALUES ('interrupted', 'hash', 'running', 'Simulating', ?, ?, ?, ?)").run(path.join(config.rendersRoot, "interrupted", "animation.mp4"), new Date().toISOString(), new Date().toISOString(), new Date(Date.now() + 100000).toISOString());
+  manager.db.prepare("INSERT INTO animation_jobs(id, prompt_hash, prompt, status, stage, output_path, created_at, updated_at, cleanup_after) VALUES ('interrupted', 'hash', 'saved prompt', 'running', 'Simulating', ?, ?, ?, ?)").run(path.join(config.rendersRoot, "interrupted", "animation.mp4"), new Date().toISOString(), new Date().toISOString(), new Date(Date.now() + 100000).toISOString());
   manager.close();
   const recovered = new AnimationJobManager(config);
   assert.equal(recovered.get("interrupted").status, "cancelled");
   assert.equal(recovered.get("interrupted").error.code, "CANCELLED");
   recovered.close();
+}));
+
+test("persists prompts, lists history, and deletes managed job data", async () => withManager(async ({ manager, config, children }) => {
+  const prompt = "A ball bounces once; it's not SQL.";
+  const job = manager.create(prompt);
+  assert.equal(manager.get(job.id).prompt, prompt);
+  assert.equal(manager.list().at(0).id, job.id);
+  const output = path.join(config.rendersRoot, job.id, "animation.mp4");
+  await writeFile(output, "video"); children[0].emit("exit", 0);
+  manager.remove(job.id);
+  assert.equal(manager.get(job.id), null);
 }));
 
 test("cleans expired output only inside the managed render directory", async () => withManager(async ({ manager, config, children }) => {

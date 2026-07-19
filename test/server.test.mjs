@@ -27,21 +27,29 @@ test("health and chat endpoints expose a versioned contract", async () => withSe
   assert.equal(body.answer, "explain: gravity");
 }));
 
-test("animation cancellation is exposed through the API", async () => {
-  const job = { id: "11111111-1111-4111-8111-111111111111", status: "running", stage: "Compiling", error: null, videoUrl: null, createdAt: new Date().toISOString(), queuePosition: null };
+test("animation history, cancellation, and deletion are exposed through the API", async () => {
+  const job = { id: "11111111-1111-4111-8111-111111111111", prompt: "A pendulum swings.", status: "running", stage: "Compiling", error: null, videoUrl: null, createdAt: new Date().toISOString(), queuePosition: null };
+  let deleted = false;
   const jobManager = {
     create: () => job,
     get: () => job,
+    list: () => [job],
     cancel: () => ({ ...job, status: "cancelled", stage: "Animation cancelled", error: { code: "CANCELLED", message: "The animation was cancelled." } }),
+    remove: () => { deleted = true; },
     getOutputPath: () => null,
     close: () => {},
   };
   await withServer(async (base) => {
-    const response = await fetch(`${base}/api/animations/${job.id}`, { method: "DELETE" });
+    const history = await fetch(`${base}/api/animations?limit=10`);
+    assert.equal((await history.json()).jobs[0].prompt, "A pendulum swings.");
+    const response = await fetch(`${base}/api/animations/${job.id}/cancel`, { method: "POST" });
     const body = await response.json();
     assert.equal(response.status, 200);
     assert.equal(body.status, "cancelled");
     assert.equal(body.error.code, "CANCELLED");
+    const deletion = await fetch(`${base}/api/animations/${job.id}`, { method: "DELETE" });
+    assert.equal(deletion.status, 204);
+    assert.equal(deleted, true);
   }, { jobManager });
 });
 
