@@ -67,9 +67,12 @@ export function validateVisualizationJob(value) {
   const issues = !isRecord(value) ? [issue("body", "must be an object")] : versionIssues(value);
   if (!isRecord(value)) return result(value, issues);
   if (!isString(value.id, { min: 1 })) issues.push(issue("id", "must be a non-empty string"));
+  if (value.prompt !== undefined && !isString(value.prompt, { max: 2000 })) issues.push(issue("prompt", "must be a string under 2,000 characters"));
   if (!JOB_STATUSES.includes(value.status)) issues.push(issue("status", "is not recognised"));
   if (!isString(value.stage, { min: 1 })) issues.push(issue("stage", "must be a non-empty string"));
   if (!isString(value.createdAt, { min: 1 })) issues.push(issue("createdAt", "must be an ISO timestamp"));
+  if (value.queuePosition !== null && value.queuePosition !== undefined && (!Number.isInteger(value.queuePosition) || value.queuePosition < 1)) issues.push(issue("queuePosition", "must be a positive integer or null"));
+  if (value.error !== null && value.error !== undefined && (!isRecord(value.error) || !isString(value.error.code, { min: 1 }) || !isString(value.error.message, { min: 1 }))) issues.push(issue("error", "must be a safe error object or null"));
   return result(value, issues);
 }
 
