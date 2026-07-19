@@ -5,8 +5,9 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { loadConfig } from "./config.mjs";
-import { validateChatRequest, validateExplainRequest, validateVisualizationJob, requireValid } from "./contracts.mjs";
+import { validateChatRequest, validateExplainRequest, validateGuideMessageRequest, validateGuideSessionRequest, validateVisualizationJob, requireValid } from "./contracts.mjs";
 import { ExplainService } from "./explain-service.mjs";
+import { GuideService } from "./guide-service.mjs";
 import { VeloError, errorPayload, toVeloError } from "./errors.mjs";
 import { AnimationJobManager } from "./job-manager.mjs";
 import { createLogger } from "./logger.mjs";
@@ -53,6 +54,7 @@ async function serveVideo(request, response, filePath) {
 export function createVeloServer({ config = loadConfig(), provider = createProvider(config), log = createLogger(), jobManager } = {}) {
   const jobs = jobManager || new AnimationJobManager(config, { log });
   const explain = new ExplainService(config, { provider, log });
+  const guide = new GuideService(config, { log });
   const providerHealth = { checkedAt: null, result: null };
   async function refreshProviderHealth() {
     try { providerHealth.result = await provider.health(); }
@@ -82,6 +84,12 @@ export function createVeloServer({ config = loadConfig(), provider = createProvi
         emit("complete", { checkQuestion: explanation.checkQuestion, spokenText: explanation.spokenText });
         return response.end();
       }
+      if (request.method === "POST" && url.pathname === "/api/guide/sessions") return send(response, 201, guide.create(requireValid(validateGuideSessionRequest(await readJson(request)), "Please enter a physics problem to guide through.")), requestId);
+      const guideMatch = url.pathname.match(/^\/api\/guide\/sessions\/([0-9a-f-]+)$/i);
+      if (guideMatch && request.method === "GET") { const session = guide.get(guideMatch[1]); if (!session) throw new VeloError("NOT_FOUND", "Guide session not found."); return send(response, 200, session, requestId); }
+      if (guideMatch && request.method === "DELETE") { guide.remove(guideMatch[1]); return send(response, 204, {}, requestId); }
+      const guideMessageMatch = url.pathname.match(/^\/api\/guide\/sessions\/([0-9a-f-]+)\/messages$/i);
+      if (guideMessageMatch && request.method === "POST") return send(response, 200, guide.message(guideMessageMatch[1], requireValid(validateGuideMessageRequest(await readJson(request)), "Please enter an answer or choose a guide action.")), requestId);
       if (request.method === "POST" && url.pathname === "/api/animations") {
         const { prompt } = requireValid(validateChatRequest(await readJson(request)), "Please enter an animation prompt between 1 and 2,000 characters.");
         return send(response, 202, publicJob(jobs.create(prompt)), requestId);
@@ -100,7 +108,7 @@ export function createVeloServer({ config = loadConfig(), provider = createProvi
       return send(response, safe.status, errorPayload(safe, requestId), requestId);
     } finally { log("info", "request_complete", { requestId, method: request.method, pathname: request.url, durationMs: Date.now() - startedAt }); }
   });
-  return { server, config, provider, jobs, explain, refreshProviderHealth, close: () => { jobs.close(); explain.close(); } };
+  return { server, config, provider, jobs, explain, guide, refreshProviderHealth, close: () => { jobs.close(); explain.close(); guide.close(); } };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

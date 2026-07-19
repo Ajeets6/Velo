@@ -70,3 +70,13 @@ test("Explain stream returns metadata, structured sections, and completion speec
   assert.match(body, /event: section/);
   assert.match(body, /event: complete/);
 }));
+
+test("Guide session API creates, advances, and deletes a persistent lesson", async () => withServer(async (base) => {
+  const created = await fetch(`${base}/api/guide/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "Explain a falling ball" }) });
+  const session = await created.json();
+  assert.equal(created.status, 201);
+  const hint = await fetch(`${base}/api/guide/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "hint" }) });
+  assert.equal((await hint.json()).message.classification, "hint");
+  const removed = await fetch(`${base}/api/guide/sessions/${session.id}`, { method: "DELETE" });
+  assert.equal(removed.status, 204);
+}));
