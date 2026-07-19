@@ -98,14 +98,14 @@ function Tutor({ onBack, theme, onToggleTheme }) {
         body: JSON.stringify({ prompt: question }),
       });
       const startedJob = await startResponse.json();
-      if (!startResponse.ok) throw new Error(startedJob.error || "MotionForge could not start.");
+      if (!startResponse.ok) throw new Error(startedJob.error?.message || startedJob.error || "MotionForge could not start.");
       setAnimation(startedJob);
 
       for (;;) {
         await new Promise((resolve) => window.setTimeout(resolve, 1200));
         const statusResponse = await fetch(`/api/animations/${startedJob.id}`);
         const job = await statusResponse.json();
-        if (!statusResponse.ok) throw new Error(job.error || "Animation status could not be read.");
+        if (!statusResponse.ok) throw new Error(job.error?.message || job.error || "Animation status could not be read.");
         setAnimation(job);
         if (job.status === "complete" || job.status === "failed") break;
       }
@@ -130,7 +130,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
         body: JSON.stringify({ prompt: question, mode }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Velo could not answer that yet.");
+      if (!response.ok) throw new Error(data.error?.message || data.error || "Velo could not answer that yet.");
       setResult(data);
       setBackendOnline(true);
     } catch (error) {
