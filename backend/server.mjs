@@ -8,6 +8,8 @@ import { loadConfig } from "./config.mjs";
 import { validateChatRequest, validateExplainRequest, validateGuideMessageRequest, validateGuideSessionRequest, validateVisualizationJob, requireValid } from "./contracts.mjs";
 import { ExplainService } from "./explain-service.mjs";
 import { GuideService } from "./guide-service.mjs";
+import { MotionForgeSidecar } from "./motionforge-sidecar.mjs";
+import { TimelineCache } from "./timeline-cache.mjs";
 import { VeloError, errorPayload, toVeloError } from "./errors.mjs";
 import { AnimationJobManager } from "./job-manager.mjs";
 import { createLogger } from "./logger.mjs";
@@ -51,10 +53,12 @@ async function serveVideo(request, response, filePath) {
   return createReadStream(filePath, { start, end }).pipe(response);
 }
 
-export function createVeloServer({ config = loadConfig(), provider = createProvider(config), log = createLogger(), jobManager } = {}) {
+export function createVeloServer({ config = loadConfig(), provider = createProvider(config), log = createLogger(), jobManager, motionForge, timelineCache } = {}) {
   const jobs = jobManager || new AnimationJobManager(config, { log });
   const explain = new ExplainService(config, { provider, log });
   const guide = new GuideService(config, { log });
+  const sidecar = motionForge || new MotionForgeSidecar({ executable: config.motionForgeExecutable, startupMs: config.motionForgeStartupMs, log });
+  const timelines = timelineCache || new TimelineCache(config);
   const providerHealth = { checkedAt: null, result: null };
   async function refreshProviderHealth() {
     try { providerHealth.result = await provider.health(); }
@@ -94,6 +98,19 @@ export function createVeloServer({ config = loadConfig(), provider = createProvi
         const { prompt } = requireValid(validateChatRequest(await readJson(request)), "Please enter an animation prompt between 1 and 2,000 characters.");
         return send(response, 202, publicJob(jobs.create(prompt)), requestId);
       }
+      if (request.method === "GET" && url.pathname === "/api/motionforge/health") return send(response, 200, await sidecar.health(), requestId);
+      if (request.method === "POST" && url.pathname === "/api/visualizations") return send(response, 202, await sidecar.request("/v1/visualizations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ contractVersion: 1, ...(await readJson(request)), provider: config.motionForgeProvider, model: config.motionForgeModel, simulationOptions: { recommendedPlaybackFps: 30, recordInspectables: true, detectEvents: true } }) }), requestId);
+      const visualizationMatch = url.pathname.match(/^\/api\/visualizations\/([0-9a-f-]+)$/i);
+      if (visualizationMatch && request.method === "GET") return send(response, 200, await sidecar.request(`/v1/visualizations/${visualizationMatch[1]}`, { method: "GET" }), requestId);
+      if (visualizationMatch && request.method === "DELETE") return send(response, 200, await sidecar.request(`/v1/visualizations/${visualizationMatch[1]}`, { method: "DELETE" }), requestId);
+      const timelineMatch = url.pathname.match(/^\/api\/visualizations\/([0-9a-f-]+)\/timeline$/i);
+      if (timelineMatch && request.method === "GET") { try { const cached = timelines.get(timelineMatch[1]); if (cached) return send(response, 200, cached, requestId); const payload = await sidecar.request(`/v1/visualizations/${timelineMatch[1]}/timeline`, { method: "GET" }); try { return send(response, 200, timelines.put(timelineMatch[1], payload.timeline), requestId); } catch (cacheError) { log("warn", "timeline_cache_failed", { requestId, name: cacheError.name }); return send(response, 200, { contractVersion: 1, visualizationId: timelineMatch[1], timeline: payload.timeline, cached: false }, requestId); } } catch (error) { throw error; } }
+      const eventMatch = url.pathname.match(/^\/api\/visualizations\/([0-9a-f-]+)\/events$/i);
+      if (eventMatch && request.method === "GET") { if (url.searchParams.get("poll") === "1") return send(response, 200, await sidecar.request(`/v1/visualizations/${eventMatch[1]}`, { method: "GET" }), requestId); const upstream = await sidecar.stream(`/v1/visualizations/${eventMatch[1]}/events`, { lastEventId: request.headers["last-event-id"] }); response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "connection": "keep-alive", "x-request-id": requestId }); const reader = upstream.body.getReader(); void (async () => { try { while (true) { const { value, done } = await reader.read(); if (done) break; response.write(Buffer.from(value)); } } finally { response.end(); } })(); return; }
+      const parameterMatch = url.pathname.match(/^\/api\/visualizations\/([0-9a-f-]+)\/parameters$/i);
+      if (parameterMatch && request.method === "POST") { const payload = await sidecar.request(`/v1/visualizations/${parameterMatch[1]}/parameters`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ contractVersion: 1, ...(await readJson(request)) }) }); timelines.invalidate(parameterMatch[1]); return send(response, 202, payload, requestId); }
+      const exportMatch = url.pathname.match(/^\/api\/visualizations\/([0-9a-f-]+)\/exports$/i);
+      if (exportMatch && request.method === "POST") return send(response, 202, await sidecar.request(`/v1/visualizations/${exportMatch[1]}/exports`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ contractVersion: 1, ...(await readJson(request)) }) }), requestId);
       if (request.method === "GET" && url.pathname === "/api/animations") return send(response, 200, { contractVersion: 1, jobs: jobs.list(pageParameters(url)) }, requestId);
       const jobMatch = url.pathname.match(/^\/api\/animations\/([0-9a-f-]+)$/i);
       if (jobMatch && request.method === "GET") { const job = jobs.get(jobMatch[1]); if (!job) throw new VeloError("NOT_FOUND", "Animation job not found."); return send(response, 200, publicJob(job), requestId); }
@@ -108,7 +125,7 @@ export function createVeloServer({ config = loadConfig(), provider = createProvi
       return send(response, safe.status, errorPayload(safe, requestId), requestId);
     } finally { log("info", "request_complete", { requestId, method: request.method, pathname: request.url, durationMs: Date.now() - startedAt }); }
   });
-  return { server, config, provider, jobs, explain, guide, refreshProviderHealth, close: () => { jobs.close(); explain.close(); guide.close(); } };
+  return { server, config, provider, jobs, explain, guide, sidecar, timelines, refreshProviderHealth, close: () => { jobs.close(); explain.close(); guide.close(); timelines.close(); sidecar.stop(); } };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

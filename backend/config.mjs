@@ -17,6 +17,8 @@ function nonNegativeInteger(value, fallback, name) {
 export function loadConfig(env = process.env, root = process.cwd()) {
   const provider = env.VELO_PROVIDER || "local";
   if (!["local", "ollama"].includes(provider)) throw new VeloError("INVALID_REQUEST", "VELO_PROVIDER must be local or ollama.");
+  const motionForgeProvider = env.MOTIONFORGE_PROVIDER || "ollama";
+  if (!["ollama", "anthropic"].includes(motionForgeProvider)) throw new VeloError("INVALID_REQUEST", "MOTIONFORGE_PROVIDER must be ollama or anthropic.");
   const dataDir = env.VELO_DATA_DIR || path.join(env.LOCALAPPDATA || env.APPDATA || path.join(os.homedir(), ".local", "share"), "Velo");
   return Object.freeze({
     port: positiveInteger(env.VELO_API_PORT, 8787, "VELO_API_PORT", 65535),
@@ -29,7 +31,9 @@ export function loadConfig(env = process.env, root = process.cwd()) {
     rendersRoot: path.join(dataDir, "renders"),
     databasePath: path.join(dataDir, "velo.sqlite"),
     motionForgeExecutable: env.MOTIONFORGE_EXECUTABLE || path.resolve(root, "..", "MotionForge", "dist", "prompt-animator", "prompt-animator.exe"),
+    motionForgeProvider,
     motionForgeModel: env.MOTIONFORGE_MODEL || "gpt-oss:120b-cloud",
+    motionForgeStartupMs: positiveInteger(env.MOTIONFORGE_STARTUP_MS, 10000, "MOTIONFORGE_STARTUP_MS", 60000),
     renderConcurrency: positiveInteger(env.VELO_RENDER_CONCURRENCY, 1, "VELO_RENDER_CONCURRENCY", 8),
     compileTimeoutMs: positiveInteger(env.VELO_COMPILE_TIMEOUT_MS, 120000, "VELO_COMPILE_TIMEOUT_MS"),
     simulationTimeoutMs: positiveInteger(env.VELO_SIMULATION_TIMEOUT_MS, 180000, "VELO_SIMULATION_TIMEOUT_MS"),
