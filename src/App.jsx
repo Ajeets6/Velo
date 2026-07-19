@@ -23,11 +23,27 @@ function AnimationCard({ job, onOpen, onCancel }) {
   return <article className={`visualization-card ${job.status}`}><button type="button" className="visualization-card-open" onClick={(event) => onOpen(job, event)}><span className="visualization-card-status">{active ? <SpinnerGap className="spin" weight="bold" /> : job.status === "complete" ? <FilmSlate weight="fill" /> : <WarningCircle weight="fill" />}</span><span className="visualization-card-copy"><strong>{job.prompt || "Earlier visualization"}</strong><span>{job.queuePosition ? `Queue position ${job.queuePosition}` : label}</span></span></button>{active && <button type="button" className="visualization-card-cancel" onClick={() => onCancel(job.id)}>Cancel</button>}</article>;
 }
 
+function PhysicsDiagram({ type }) {
+  if (type === "orbit") return <svg className="physics-diagram" viewBox="0 0 260 120" role="img" aria-label="A satellite travelling around Earth"><circle cx="70" cy="60" r="28" fill="currentColor" opacity=".22" /><circle cx="70" cy="60" r="46" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray="5 5" /><circle cx="112" cy="40" r="5" fill="currentColor" /><path d="M112 40l-13 2 7 10" fill="none" stroke="currentColor" strokeWidth="2" /></svg>;
+  if (type === "force") return <svg className="physics-diagram" viewBox="0 0 260 120" role="img" aria-label="A box with opposing force arrows"><rect x="105" y="45" width="50" height="35" rx="4" fill="currentColor" opacity=".2" /><path d="M95 62H35m0 0 10-8m-10 8 10 8M165 62h60m0 0-10-8m10 8-10 8" fill="none" stroke="currentColor" strokeWidth="3" /></svg>;
+  if (type === "graph") return <svg className="physics-diagram" viewBox="0 0 260 120" role="img" aria-label="A graph showing energy changing over time"><path d="M35 15v80h190M45 82c38-4 55-20 80-44s49-20 88-56" fill="none" stroke="currentColor" strokeWidth="3" /></svg>;
+  return null;
+}
+
+function ExplainResponse({ explanation, learnerLevel, setLearnerLevel, onSpeak, speechState, onVisualize }) {
+  if (!explanation) return null;
+  return <section className="explain-response" aria-live="polite"><div className="explain-toolbar"><div className="level-controls" aria-label="Explanation depth"><button onClick={() => setLearnerLevel("simpler")} className={learnerLevel === "simpler" ? "active" : ""}>Simpler</button><button onClick={() => setLearnerLevel("current")} className={learnerLevel === "current" ? "active" : ""}>Current level</button><button onClick={() => setLearnerLevel("technical")} className={learnerLevel === "technical" ? "active" : ""}>More technical</button></div><div className="speech-controls"><button onClick={() => onSpeak("all")}>{speechState.status === "speaking" ? "Pause" : speechState.status === "paused" ? "Resume" : "Listen"}</button><button onClick={() => onSpeak("restart")}>Restart</button><select value={speechState.rate} onChange={(event) => onSpeak("rate", Number(event.target.value))} aria-label="Speech speed"><option value="0.8">0.8×</option><option value="1">1×</option><option value="1.2">1.2×</option></select></div></div><h1>{explanation.title || "Building your explanation…"}</h1>{explanation.summary && <p className="explain-summary">{explanation.summary}</p>}<PhysicsDiagram type={explanation.visualSuggestion} />{explanation.sections.map((section, index) => <article className={`explain-section ${section.kind}`} key={`${section.kind}-${index}`}><div><span>{section.kind}</span>{section.kind === "equation" && <p className="equation" aria-label={section.spokenText}>{section.latex}</p>}{section.text && <p>{section.text}</p>}</div><button className="section-listen" onClick={() => onSpeak("section", section.spokenText || section.text)} aria-label={`Listen to ${section.kind}`} title={`Listen to ${section.kind}`}><SpeakerHigh weight="fill" /></button></article>)}{explanation.checkQuestion && <div className="explain-check"><strong>Check your understanding</strong><p>{explanation.checkQuestion}</p></div>}{explanation.visualSuggestion && <button className="explain-visualize" onClick={onVisualize}>Visualize this idea</button>}</section>;
+}
+
 function Tutor({ onBack, theme, onToggleTheme }) {
   const [mode, setMode] = useState("explain");
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [speechState, setSpeechState] = useState({ status: "idle", rate: 1 });
+  const [learnerLevel, setLearnerLevel] = useState("current");
+  const [explanation, setExplanation] = useState(null);
+  const [explainSessionId, setExplainSessionId] = useState(() => sessionStorage.getItem("velo-explain-session") || "");
   const [backendOnline, setBackendOnline] = useState(false);
   const [animationJobs, setAnimationJobs] = useState([]);
   const [selectedAnimationId, setSelectedAnimationId] = useState(null);
@@ -36,6 +52,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
   const inputRef = useRef(null);
   const dialogRef = useRef(null);
   const cardTriggerRef = useRef(null);
+  const utteranceRef = useRef(null);
   const [result, setResult] = useState({ title: "Ask anything about physics", answer: "Choose how you want to learn, then send a question. Velo can explain the idea, guide you with one step at a time, or prepare a visual model.", nextStep: "Try one of the prompts below, or write your own." });
 
   async function refreshAnimations() {
@@ -87,6 +104,32 @@ function Tutor({ onBack, theme, onToggleTheme }) {
   }
   function openAnimation(job, event) { cardTriggerRef.current = event.currentTarget; setSelectedAnimationId(job.id); }
   function useStarter(text) { setPrompt(text); requestAnimationFrame(() => inputRef.current?.focus()); }
+  async function streamExplain(question, level = learnerLevel) {
+    setExplanation({ title: "Building your explanation…", summary: "", sections: [], visualSuggestion: null });
+    const response = await fetch("/api/explain/stream", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: question, learnerLevel: level, sessionId: explainSessionId || undefined }) });
+    if (!response.ok || !response.body) { const data = await response.json().catch(() => ({})); throw new Error(data.error?.message || "Velo could not build that explanation."); }
+    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read(); if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const messages = buffer.split("\n\n"); buffer = messages.pop();
+      for (const message of messages) {
+        const event = message.match(/^event: (.+)$/m)?.[1]; const data = message.match(/^data: (.+)$/m)?.[1]; if (!event || !data) continue;
+        const payload = JSON.parse(data);
+        if (event === "meta") { setExplainSessionId(payload.sessionId); sessionStorage.setItem("velo-explain-session", payload.sessionId); setExplanation((current) => ({ ...current, ...payload })); }
+        if (event === "section") setExplanation((current) => ({ ...current, sections: [...current.sections, payload] }));
+        if (event === "complete") setExplanation((current) => ({ ...current, ...payload }));
+      }
+    }
+  }
+  function explainSpeech(action, text) {
+    if (!("speechSynthesis" in window)) return;
+    if (action === "rate") { setSpeechState((state) => ({ ...state, rate: text })); return; }
+    if (action === "restart") { window.speechSynthesis.cancel(); setSpeechState((state) => ({ ...state, status: "idle" })); if (explanation?.spokenText) setTimeout(() => explainSpeech("all"), 0); return; }
+    if (action === "all" && speechState.status === "speaking") { window.speechSynthesis.pause(); setSpeechState((state) => ({ ...state, status: "paused" })); return; }
+    if (action === "all" && speechState.status === "paused") { window.speechSynthesis.resume(); setSpeechState((state) => ({ ...state, status: "speaking" })); return; }
+    window.speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(text || explanation?.spokenText || ""); utterance.rate = speechState.rate; utterance.onstart = () => setSpeechState((state) => ({ ...state, status: "speaking" })); utterance.onend = () => setSpeechState((state) => ({ ...state, status: "idle" })); utterance.onerror = () => setSpeechState((state) => ({ ...state, status: "idle" })); utteranceRef.current = utterance; window.speechSynthesis.speak(utterance);
+  }
   function speak() {
     if (!("speechSynthesis" in window) || loading) return;
     if (speaking) { window.speechSynthesis.cancel(); setSpeaking(false); return; }
@@ -97,7 +140,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
     event?.preventDefault(); const question = prompt.trim(); if (!question || loading) return;
     window.speechSynthesis?.cancel(); setSpeaking(false); setLoading(true);
     if (mode === "visualize") void generateAnimation(question);
-    try { const response = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: question, mode }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error?.message || data.error || "Velo could not answer that yet."); setResult(data); setBackendOnline(true); } catch (error) { setResult({ title: "Connection interrupted", answer: error.message, nextStep: "Make sure the local backend is running, then try again." }); setBackendOnline(false); } finally { setLoading(false); }
+    try { if (mode === "explain") { await streamExplain(question); setBackendOnline(true); } else { const response = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: question, mode }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error?.message || data.error || "Velo could not answer that yet."); setResult(data); setBackendOnline(true); } } catch (error) { setResult({ title: "Connection interrupted", answer: error.message, nextStep: "Make sure the local backend is running, then try again." }); setBackendOnline(false); } finally { setLoading(false); }
   }
 
   const latestAnimation = animationJobs[0] || null;
@@ -106,6 +149,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
 
   return <main className="tutor-screen"><header className="tutor-header"><button className="icon-button" onClick={onBack} aria-label="Back to welcome"><ArrowLeft weight="bold" /></button><a className="brand compact" href="#" onClick={(event) => { event.preventDefault(); onBack(); }}><span className="brand-icon"><Atom weight="duotone" /></span><span>Velo</span></a><div className="header-actions"><ThemeToggle theme={theme} onToggle={onToggleTheme} /><div className={`backend-state ${backendOnline ? "online" : "offline"}`}><span />{backendOnline ? "Local backend" : "Reconnecting"}</div></div></header><div className="tutor-body"><section className="mode-section" aria-labelledby="mode-label"><p id="mode-label">How would you like to learn?</p><div className="mode-switcher">{modes.map(({ id, label, icon: Icon }) => <button key={id} className={mode === id ? "active" : ""} onClick={() => setMode(id)} aria-pressed={mode === id}><Icon weight={mode === id ? "fill" : "regular"} />{label}</button>)}</div></section><section className="voice-section"><button className={`voice-button ${speaking ? "speaking" : ""}`} onClick={speak} aria-label={speaking ? "Stop speaking" : "Read response aloud"}>{speaking ? <Pause weight="fill" /> : <SpeakerHigh weight="fill" />}</button><span>{speaking ? "Speaking" : "Listen"}</span></section><section className={`output-card ${loading ? "loading" : ""}`} aria-live="polite" aria-busy={loading}><div className="output-label"><Sparkle weight="fill" /> VELO</div>{loading ? <div className="thinking"><span /><span /><span /><p>Thinking through your question…</p></div> : <div className="output-copy"><h1>{result.title}</h1><p>{result.answer}</p>{result.nextStep && <div className="next-step"><CheckCircle weight="fill" /><span>{result.nextStep}</span></div>}{result.motionforge && <div className="motionforge-note"><Waveform weight="duotone" /><span>MotionForge scene prepared</span></div>}</div>}</section>
 
+    {mode === "explain" && explanation && <ExplainResponse explanation={explanation} learnerLevel={learnerLevel} setLearnerLevel={(level) => { setLearnerLevel(level); if (prompt.trim()) void streamExplain(prompt.trim(), level); }} onSpeak={explainSpeech} speechState={speechState} onVisualize={() => { setMode("visualize"); }} />}
     {(latestAnimation || animationError) && <section className="visualizations" aria-label="Saved visualizations"><div className="visualizations-heading"><FilmSlate weight="duotone" /><div><strong>Latest visualization</strong><span>Saved on this device</span></div>{historyJobs.length > 0 && <button type="button" className="visualization-history-button" onClick={() => setHistoryOpen(true)}>History ({historyJobs.length})</button>}</div>{animationError && <p className="visualizations-error">{animationError}</p>}{latestAnimation?.status === "complete" ? <div className="latest-visualization"><p>{latestAnimation.prompt}</p><video controls autoPlay muted playsInline src={latestAnimation.videoUrl}>Your browser does not support MP4 video.</video><button type="button" className="latest-details" onClick={(event) => openAnimation(latestAnimation, event)}>Open details</button></div> : latestAnimation && <AnimationCard job={latestAnimation} onOpen={openAnimation} onCancel={cancelAnimation} />}</section>}
 
     <div className="starter-row" aria-label="Suggested prompts">{starters.map((starter) => <button key={starter} onClick={() => useStarter(starter)}>{starter}</button>)}</div><form className="prompt-form" onSubmit={submit}><label htmlFor="physics-prompt">Ask Velo</label><div className="prompt-field"><textarea id="physics-prompt" ref={inputRef} value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} placeholder="Ask a physics question…" rows="1" /><button type="submit" disabled={!prompt.trim() || loading} aria-label="Send question"><PaperPlaneTilt weight="fill" /></button></div><span>Press Enter to send · Shift + Enter for a new line</span></form></div>
