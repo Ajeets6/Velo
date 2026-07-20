@@ -522,7 +522,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
       const response = await fetch("/api/visualizations", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: question, preferTemplate: true, ...settings.interactive }),
+        body: JSON.stringify({ prompt: question, ...settings.interactive }),
       });
       const data = await response.json();
       if (!response.ok)
