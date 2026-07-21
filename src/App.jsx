@@ -1623,6 +1623,20 @@ function Tutor({ onBack, theme, onToggleTheme }) {
               <p className="dialog-error">
                 {selectedAnimation.error?.message ||
                   "The animation could not be completed."}
+                {selectedAnimation.error?.code && (
+                  <span>
+                    <br />
+                    {selectedAnimation.error.code}
+                  </span>
+                )}
+                {Array.isArray(selectedAnimation.error?.details) &&
+                  selectedAnimation.error.details.map((detail, index) => (
+                    <span key={`${detail.path || "error"}-${index}`}>
+                      <br />
+                      {detail.path ? `${detail.path}: ` : ""}
+                      {detail.message || String(detail)}
+                    </span>
+                  ))}
               </p>
             )}
             {selectedAnimation.status === "cancelled" && (

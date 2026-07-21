@@ -32,6 +32,24 @@ test("queues work, limits concurrency, and starts the next job after completion"
   assert.equal(children.length, 2);
 }));
 
+test("uses the deterministic template fast path for recognized animation prompts", async () => withManager(async ({ manager, commands }) => {
+  manager.create("a ball drops on a ramp");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(commands[0][1].includes("--prefer-template"), true);
+}));
+
+test("preserves MotionForge structured errors and validation details", async () => withManager(async ({ manager, children }) => {
+  const job = manager.create("an invalid generated scene");
+  await new Promise((resolve) => setImmediate(resolve));
+  children[0].stderr.emit("data", Buffer.from('{"error":{"code":"INVALID_SCENE","message":"The model could not produce a valid physics scene.","details":[{"path":"$.physics.objects[1].length","message":"Extra inputs are not permitted"}]}}\n'));
+  children[0].emit("exit", 2);
+  const failed = manager.get(job.id);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.error.code, "INVALID_SCENE");
+  assert.equal(failed.error.message, "The model could not produce a valid physics scene.");
+  assert.deepEqual(failed.error.details, [{ path: "$.physics.objects[1].length", message: "Extra inputs are not permitted" }]);
+}));
+
 test("cancels queued and running jobs idempotently", async () => withManager(async ({ manager, children }) => {
   const running = manager.create("running");
   const queued = manager.create("queued");

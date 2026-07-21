@@ -9,6 +9,7 @@ import { ensurePrivateDataDirectory } from "./private-data.mjs";
 const terminalStatuses = new Set(["complete", "failed", "cancelled"]);
 const timestamp = () => new Date().toISOString();
 const MAX_PROCESS_DIAGNOSTIC_CHARS = 2048;
+const MAX_STRUCTURED_ERROR_CHARS = 64 * 1024;
 const SENSITIVE_ENVIRONMENT_KEY = /authorization|password|secret|token|api.?key/i;
 
 function appendDiagnosticTail(current, chunk) {
@@ -36,6 +37,20 @@ function processFailureMessage(code, signal, outputExists) {
   if (signal) return `MotionForge ended after receiving ${signal}.`;
   if (!outputExists) return "MotionForge finished without creating the animation file.";
   return "MotionForge could not complete the animation.";
+}
+
+function parseMotionForgeError(stderr) {
+  for (const line of stderr.split(/\r?\n/).reverse()) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line);
+      const error = parsed?.error ?? parsed;
+      if (typeof error?.code === "string" && typeof error?.message === "string") {
+        return { code: error.code, message: error.message, details: error.details ?? null };
+      }
+    } catch {}
+  }
+  return null;
 }
 
 function terminateProcessTree(child) {
@@ -78,7 +93,7 @@ export class AnimationJobManager {
     this.db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS animation_jobs (
         id TEXT PRIMARY KEY, prompt_hash TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL, stage TEXT NOT NULL,
-        error_code TEXT, error_message TEXT, output_path TEXT NOT NULL, output_size INTEGER,
+        error_code TEXT, error_message TEXT, error_details_json TEXT, output_path TEXT NOT NULL, output_size INTEGER,
         created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL, cleanup_after TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS animation_jobs_queue ON animation_jobs(status, created_at);`);
@@ -89,6 +104,8 @@ export class AnimationJobManager {
     if (!columns.includes("provider")) this.db.exec("ALTER TABLE animation_jobs ADD COLUMN provider TEXT NOT NULL DEFAULT 'ollama'");
     if (!columns.includes("model")) this.db.exec("ALTER TABLE animation_jobs ADD COLUMN model TEXT NOT NULL DEFAULT ''");
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?)").run(timestamp());
+    if (!columns.includes("error_details_json")) this.db.exec("ALTER TABLE animation_jobs ADD COLUMN error_details_json TEXT");
+    this.db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, ?)").run(timestamp());
   }
 
   recoverInterrupted() {
@@ -113,7 +130,9 @@ export class AnimationJobManager {
   publicJob(row) {
     if (!row) return null;
     const queuePosition = row.status === "queued" ? this.db.prepare("SELECT COUNT(*) AS count FROM animation_jobs WHERE status = 'queued' AND created_at < ?").get(row.created_at).count + 1 : null;
-    return { id: row.id, prompt: row.prompt, provider: row.provider, model: row.model, status: row.status, stage: row.stage, error: row.error_code ? { code: row.error_code, message: row.error_message } : null, videoUrl: row.status === "complete" ? `/renders/${row.id}/animation.mp4` : null, createdAt: row.created_at, queuePosition };
+    let details = null;
+    try { details = row.error_details_json ? JSON.parse(row.error_details_json) : null; } catch {}
+    return { id: row.id, prompt: row.prompt, provider: row.provider, model: row.model, status: row.status, stage: row.stage, error: row.error_code ? { code: row.error_code, message: row.error_message, ...(details == null ? {} : { details }) } : null, videoUrl: row.status === "complete" ? `/renders/${row.id}/animation.mp4` : null, createdAt: row.created_at, queuePosition };
   }
 
   get(id) { return this.publicJob(this.row(id)); }
@@ -175,11 +194,11 @@ export class AnimationJobManager {
     if (!existsSync(this.config.motionForgeExecutable)) return this.fail(id, "MOTIONFORGE_UNAVAILABLE", "MotionForge is not installed or configured.");
     const outputDirectory = managedPath(this.config.rendersRoot, path.dirname(job.output_path));
     ensurePrivateDataDirectory(outputDirectory);
-    this.update(id, { status: "running", stage: "Compiling the scene", started_at: timestamp(), error_code: null, error_message: null });
+    this.update(id, { status: "running", stage: "Compiling the scene", started_at: timestamp(), error_code: null, error_message: null, error_details_json: null });
     const prompt = this.pendingPrompts.get(id);
     if (!prompt) return this.fail(id, "CANCELLED", "The application restarted before this queued animation could begin.");
     this.pendingPrompts.delete(id);
-    const execution = { child: null, timer: null, sizeTimer: null, stage: "compiling", terminating: false, stderrTail: "" };
+    const execution = { child: null, timer: null, sizeTimer: null, stage: "compiling", terminating: false, stderrTail: "", structuredStderr: "" };
     this.running.set(id, execution);
     this.armTimeout(id, "compiling");
     let environment;
@@ -187,7 +206,7 @@ export class AnimationJobManager {
     catch (error) { return this.fail(id, error.code || "MODEL_UNAVAILABLE", error.message || "The selected provider could not be prepared."); }
     if (!this.running.has(id) || execution.terminating) return;
     const animationPrompt = `Create a clear, short educational physics animation for this request: ${prompt}. Use a white background, readable labels, physically plausible values, a duration of 2 to 3 seconds, and simple primitive shapes.`;
-    const child = this.spawnProcess(this.config.motionForgeExecutable, [animationPrompt, "--provider", job.provider || this.config.motionForgeProvider || "ollama", "--model", job.model || this.config.motionForgeModel, "--quality", "low", "--output", job.output_path.slice(0, -4)], { cwd: outputDirectory, windowsHide: true, env: environment });
+    const child = this.spawnProcess(this.config.motionForgeExecutable, [animationPrompt, "--provider", job.provider || this.config.motionForgeProvider || "ollama", "--model", job.model || this.config.motionForgeModel, "--prefer-template", "--quality", "low", "--output", job.output_path.slice(0, -4)], { cwd: outputDirectory, windowsHide: true, env: environment });
     execution.child = child;
     execution.sizeTimer = setInterval(() => {
       try {
@@ -203,6 +222,7 @@ export class AnimationJobManager {
     };
     const handleErrorOutput = (chunk) => {
       execution.stderrTail = appendDiagnosticTail(execution.stderrTail, chunk);
+      execution.structuredStderr = `${execution.structuredStderr}${chunk.toString("utf8")}`.slice(-MAX_STRUCTURED_ERROR_CHARS);
       handleOutput(chunk);
     };
     child.stdout?.on("data", handleOutput); child.stderr?.on("data", handleErrorOutput);
@@ -215,7 +235,13 @@ export class AnimationJobManager {
         const sensitiveValues = [prompt, animationPrompt, ...Object.entries(environment || {}).filter(([key]) => SENSITIVE_ENVIRONMENT_KEY.test(key)).map(([, value]) => value)];
         const stderrTail = redactDiagnostic(execution.stderrTail, sensitiveValues);
         this.log("warn", "motionforge_animation_failed", { jobId: id, exitCode: code, signal, outputExists, ...(stderrTail ? { stderrTail } : {}) });
-        this.fail(id, "EXPORT_FAILED", processFailureMessage(code, signal, outputExists));
+        const failure = parseMotionForgeError(execution.structuredStderr);
+        this.fail(
+          id,
+          failure?.code ?? "EXPORT_FAILED",
+          failure?.message ?? processFailureMessage(code, signal, outputExists),
+          failure?.details ?? null,
+        );
       }
     });
   }
@@ -228,12 +254,12 @@ export class AnimationJobManager {
     this.pump();
   }
 
-  fail(id, code, message) {
+  fail(id, code, message, details = null) {
     const job = this.row(id);
     if (!job || terminalStatuses.has(job.status)) return;
     const execution = this.running.get(id);
     if (execution) { execution.terminating = true; try { this.terminate(execution.child); } catch {} }
-    this.finish(id, { status: code === "CANCELLED" ? "cancelled" : "failed", stage: code === "CANCELLED" ? "Animation cancelled" : "Animation failed", error_code: code, error_message: message, completed_at: timestamp() });
+    this.finish(id, { status: code === "CANCELLED" ? "cancelled" : "failed", stage: code === "CANCELLED" ? "Animation cancelled" : "Animation failed", error_code: code, error_message: message, error_details_json: details == null ? null : JSON.stringify(details), completed_at: timestamp() });
   }
 
   cancel(id) {
