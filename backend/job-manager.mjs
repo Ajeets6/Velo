@@ -25,11 +25,12 @@ function managedPath(root, target) {
 }
 
 export class AnimationJobManager {
-  constructor(config, { log = () => {}, spawnProcess = spawn, terminate = terminateProcessTree } = {}) {
+  constructor(config, { log = () => {}, spawnProcess = spawn, terminate = terminateProcessTree, environmentForProvider = async () => process.env } = {}) {
     this.config = config;
     this.log = log;
     this.spawnProcess = spawnProcess;
     this.terminate = terminate;
+    this.environmentForProvider = environmentForProvider;
     this.running = new Map();
     this.pendingPrompts = new Map();
     mkdirSync(config.dataDir, { recursive: true });
@@ -54,6 +55,9 @@ export class AnimationJobManager {
     const columns = this.db.prepare("PRAGMA table_info(animation_jobs)").all().map((column) => column.name);
     if (!columns.includes("prompt")) this.db.exec("ALTER TABLE animation_jobs ADD COLUMN prompt TEXT NOT NULL DEFAULT ''");
     this.db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)").run(timestamp());
+    if (!columns.includes("provider")) this.db.exec("ALTER TABLE animation_jobs ADD COLUMN provider TEXT NOT NULL DEFAULT 'ollama'");
+    if (!columns.includes("model")) this.db.exec("ALTER TABLE animation_jobs ADD COLUMN model TEXT NOT NULL DEFAULT ''");
+    this.db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?)").run(timestamp());
   }
 
   recoverInterrupted() {
@@ -77,7 +81,7 @@ export class AnimationJobManager {
   publicJob(row) {
     if (!row) return null;
     const queuePosition = row.status === "queued" ? this.db.prepare("SELECT COUNT(*) AS count FROM animation_jobs WHERE status = 'queued' AND created_at < ?").get(row.created_at).count + 1 : null;
-    return { id: row.id, prompt: row.prompt, status: row.status, stage: row.stage, error: row.error_code ? { code: row.error_code, message: row.error_message } : null, videoUrl: row.status === "complete" ? `/renders/${row.id}/animation.mp4` : null, createdAt: row.created_at, queuePosition };
+    return { id: row.id, prompt: row.prompt, provider: row.provider, model: row.model, status: row.status, stage: row.stage, error: row.error_code ? { code: row.error_code, message: row.error_message } : null, videoUrl: row.status === "complete" ? `/renders/${row.id}/animation.mp4` : null, createdAt: row.created_at, queuePosition };
   }
 
   get(id) { return this.publicJob(this.row(id)); }
@@ -93,14 +97,16 @@ export class AnimationJobManager {
     return this.row(id);
   }
 
-  create(prompt) {
+  create(prompt, selection = { provider: this.config.motionForgeProvider || "ollama", model: this.config.motionForgeModel }, { executionPrompt = prompt } = {}) {
     const id = randomUUID();
     const outputPath = managedPath(this.config.rendersRoot, path.join(this.config.rendersRoot, id, "animation.mp4"));
     const time = timestamp();
     const hash = createHash("sha256").update(prompt).digest("hex");
-    this.db.prepare("INSERT INTO animation_jobs(id, prompt_hash, prompt, status, stage, output_path, created_at, updated_at, cleanup_after) VALUES (?, ?, ?, 'queued', 'Queued for rendering', ?, ?, ?, ?)").run(id, hash, prompt, outputPath, time, time, new Date(Date.now() + this.config.cleanupAfterHours * 3600000).toISOString());
+    this.db.prepare("INSERT INTO animation_jobs(id, prompt_hash, prompt, provider, model, status, stage, output_path, created_at, updated_at, cleanup_after) VALUES (?, ?, ?, ?, ?, 'queued', 'Queued for rendering', ?, ?, ?, ?)").run(id, hash, prompt, selection.provider, selection.model, outputPath, time, time, new Date(Date.now() + this.config.cleanupAfterHours * 3600000).toISOString());
     this.log("info", "animation_queued", { jobId: id });
-    this.pendingPrompts.set(id, prompt);
+    // Keep the learner-facing prompt in history. The execution prompt may also
+    // contain the bounded earlier turns needed for a refinement.
+    this.pendingPrompts.set(id, executionPrompt);
     this.pump();
     return this.get(id);
   }
@@ -129,7 +135,7 @@ export class AnimationJobManager {
     this.armTimeout(id, stage);
   }
 
-  run(id) {
+  async run(id) {
     const job = this.row(id);
     if (!job || job.status !== "queued") return;
     if (!existsSync(this.config.motionForgeExecutable)) return this.fail(id, "MOTIONFORGE_UNAVAILABLE", "MotionForge is not installed or configured.");
@@ -139,10 +145,16 @@ export class AnimationJobManager {
     const prompt = this.pendingPrompts.get(id);
     if (!prompt) return this.fail(id, "CANCELLED", "The application restarted before this queued animation could begin.");
     this.pendingPrompts.delete(id);
-    const animationPrompt = `Create a clear, short educational physics animation for this request: ${prompt}. Use a white background, readable labels, physically plausible values, a duration of 2 to 3 seconds, and simple primitive shapes.`;
-    const child = this.spawnProcess(this.config.motionForgeExecutable, [animationPrompt, "--provider", "ollama", "--model", this.config.motionForgeModel, "--quality", "low", "--output", job.output_path.slice(0, -4)], { cwd: outputDirectory, windowsHide: true, env: process.env });
-    this.running.set(id, { child, timer: null, stage: "compiling" });
+    const execution = { child: null, timer: null, stage: "compiling", terminating: false };
+    this.running.set(id, execution);
     this.armTimeout(id, "compiling");
+    let environment;
+    try { environment = await this.environmentForProvider(job.provider || this.config.motionForgeProvider || "ollama"); }
+    catch (error) { return this.fail(id, error.code || "MODEL_UNAVAILABLE", error.message || "The selected provider could not be prepared."); }
+    if (!this.running.has(id) || execution.terminating) return;
+    const animationPrompt = `Create a clear, short educational physics animation for this request: ${prompt}. Use a white background, readable labels, physically plausible values, a duration of 2 to 3 seconds, and simple primitive shapes.`;
+    const child = this.spawnProcess(this.config.motionForgeExecutable, [animationPrompt, "--provider", job.provider || this.config.motionForgeProvider || "ollama", "--model", job.model || this.config.motionForgeModel, "--quality", "low", "--output", job.output_path.slice(0, -4)], { cwd: outputDirectory, windowsHide: true, env: environment });
+    execution.child = child;
     const handleOutput = (chunk) => {
       const text = chunk.toString();
       if (text.includes("[2/4]")) this.setStage(id, "simulating", "Simulating the physics");

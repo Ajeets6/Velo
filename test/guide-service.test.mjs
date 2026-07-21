@@ -9,7 +9,7 @@ test("Guide service persists one-question lesson state and actions", async () =>
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "velo-guide-"));
   const service = new GuideService({ dataDir, databasePath: path.join(dataDir, "velo.sqlite") });
   try {
-    const session = service.create({ prompt: "Find the speed of a falling ball", learnerLevel: "current" });
+    const session = await service.create({ prompt: "Find the speed of a falling ball", learnerLevel: "current" });
     assert.match(session.currentQuestion, /What objects/);
     const hint = service.message(session.id, { action: "hint", answer: "" });
     assert.equal(hint.message.classification, "hint");

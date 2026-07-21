@@ -22,18 +22,27 @@ function feedbackFor(answer, step) {
 export class GuideService {
   constructor(config, { log = () => {} } = {}) {
     mkdirSync(config.dataDir, { recursive: true }); this.db = new DatabaseSync(config.databasePath); this.log = log;
-    this.db.exec("CREATE TABLE IF NOT EXISTS guide_sessions (id TEXT PRIMARY KEY, prompt TEXT NOT NULL, learner_level TEXT NOT NULL, state TEXT NOT NULL, outline TEXT NOT NULL, history TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+    this.db.exec("CREATE TABLE IF NOT EXISTS guide_sessions (id TEXT PRIMARY KEY, prompt TEXT NOT NULL, learner_level TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'local', model TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, outline TEXT NOT NULL, history TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+    const columns = this.db.prepare("PRAGMA table_info(guide_sessions)").all().map((column) => column.name);
+    if (!columns.includes("provider")) this.db.exec("ALTER TABLE guide_sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'local'");
+    if (!columns.includes("model")) this.db.exec("ALTER TABLE guide_sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''");
   }
   close() { this.db.close(); }
   row(id) { return this.db.prepare("SELECT * FROM guide_sessions WHERE id = ?").get(id); }
   publicSession(row, message = null) {
     if (!row) return null; const state = JSON.parse(row.state); const outline = JSON.parse(row.outline); const history = JSON.parse(row.history);
-    return { contractVersion: 1, id: row.id, prompt: row.prompt, learnerLevel: row.learner_level, goal: state.goal, known: state.known, currentStep: state.currentStep, completedSteps: state.completedSteps, misconceptions: state.misconceptions, hintLevel: state.hintLevel, progress: state.completedSteps.length / outline.length, isComplete: state.isComplete, currentQuestion: state.isComplete ? state.transferQuestion : outline[state.currentStep].question, history, message };
+    return { contractVersion: 1, id: row.id, prompt: row.prompt, learnerLevel: row.learner_level, provider: row.provider, model: row.model, goal: state.goal, known: state.known, currentStep: state.currentStep, completedSteps: state.completedSteps, misconceptions: state.misconceptions, hintLevel: state.hintLevel, progress: state.completedSteps.length / outline.length, isComplete: state.isComplete, currentQuestion: state.isComplete ? state.transferQuestion : outline[state.currentStep].question, history, message };
   }
   get(id) { return this.publicSession(this.row(id)); }
-  create({ prompt, learnerLevel }) {
+  async create({ prompt, learnerLevel }, { provider = null, selection = { provider: "local", model: "" } } = {}) {
     const id = randomUUID(); const time = now(); const state = { goal: `Reason through: ${prompt}`, known: [], currentStep: 0, completedSteps: [], misconceptions: [], hintLevel: 0, isComplete: false, transferQuestion: "How would this method change if one important condition in the problem changed?" };
-    this.db.prepare("INSERT INTO guide_sessions(id, prompt, learner_level, state, outline, history, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(id, prompt, learnerLevel, JSON.stringify(state), JSON.stringify(steps), "[]", time, time);
+    if (provider?.name === "ollama") {
+      try {
+        const response = await provider.generateText({ prompt: `Write one concise learning goal for a guided physics lesson about: ${prompt}`, mode: "guide" });
+        if (typeof response.answer === "string" && response.answer.trim()) state.goal = response.answer.trim().slice(0, 500);
+      } catch { this.log("warn", "guide_provider_fallback", { sessionId: id }); }
+    }
+    this.db.prepare("INSERT INTO guide_sessions(id, prompt, learner_level, provider, model, state, outline, history, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(id, prompt, learnerLevel, selection.provider, selection.model, JSON.stringify(state), JSON.stringify(steps), "[]", time, time);
     return this.get(id);
   }
   save(id, state, history) { this.db.prepare("UPDATE guide_sessions SET state = ?, history = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(state), JSON.stringify(history.slice(-20)), now(), id); }
