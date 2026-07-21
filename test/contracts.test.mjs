@@ -21,6 +21,18 @@ test("all Phase 0 versioned contracts accept valid representative values", () =>
   assert.equal(validateTimeline({ ...base, sceneId: "scene-1", durationMs: 2000, frames: [] }).ok, true);
 });
 
+test("explain contracts reject generic section tags", () => {
+  const base = { contractVersion: CONTRACT_VERSION, mode: "explain", title: "Gravity", summary: "A pull", checkQuestion: "What changes?", visualSuggestion: null, spokenText: "Masses attract." };
+  const genericTextSection = [{ kind: "text", text: "Masses attract." }];
+  assert.equal(validateExplainResponse({ ...base, sections: genericTextSection, variants: { simpler: { summary: "A pull", sections: genericTextSection, spokenText: "Masses attract." }, structured: { summary: "A pull", sections: genericTextSection, spokenText: "Masses attract." }, technical: { summary: "A pull", sections: genericTextSection, spokenText: "Masses attract." } } }).ok, false);
+});
+
+test("explain contracts require LaTeX for equation sections", () => {
+  const base = { contractVersion: CONTRACT_VERSION, mode: "explain", title: "Velocity", summary: "A rate", checkQuestion: "What is changing?", visualSuggestion: null, spokenText: "Velocity is change in position over time." };
+  const equationWithoutLatex = [{ kind: "equation", text: "v equals delta r over delta t" }];
+  assert.equal(validateExplainResponse({ ...base, sections: equationWithoutLatex, variants: { simpler: { summary: "A rate", sections: equationWithoutLatex, spokenText: base.spokenText }, structured: { summary: "A rate", sections: equationWithoutLatex, spokenText: base.spokenText }, technical: { summary: "A rate", sections: equationWithoutLatex, spokenText: base.spokenText } } }).ok, false);
+});
+
 test("contracts reject incompatible versions and required-field omissions", () => {
   const invalid = validateExplainResponse({ contractVersion: 2, mode: "explain", title: "x", summary: "x", sections: [], checkQuestion: "x", spokenText: "x" });
   assert.equal(invalid.ok, false);

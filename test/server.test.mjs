@@ -28,6 +28,15 @@ test("health and chat endpoints expose a versioned contract", async () => withSe
   assert.equal(body.answer, "explain: gravity");
 }));
 
+test("API rejects cross-origin-friendly body types and does not emit permissive CORS", async () => withServer(async (base) => {
+  const health = await fetch(`${base}/api/health`, { headers: { origin: "https://attacker.example" } });
+  assert.equal(health.headers.get("access-control-allow-origin"), null);
+  assert.equal(health.headers.get("x-content-type-options"), "nosniff");
+  const response = await fetch(`${base}/api/chat`, { method: "POST", headers: { "content-type": "text/plain" }, body: JSON.stringify({ prompt: "gravity" }) });
+  assert.equal(response.status, 415);
+  assert.equal((await response.json()).error.code, "INVALID_REQUEST");
+}));
+
 test("animation history, cancellation, and deletion are exposed through the API", async () => {
   const job = { id: "11111111-1111-4111-8111-111111111111", prompt: "A pendulum swings.", status: "running", stage: "Compiling", error: null, videoUrl: null, createdAt: new Date().toISOString(), queuePosition: null };
   let deleted = false;

@@ -42,6 +42,19 @@ const starters = [
 // Keep the browser implementation as a fallback while Piper is introduced.
 const BROWSER_TTS_ENABLED = true;
 
+const INITIAL_TUTOR_RESULT = {
+  title: "Ask anything about physics",
+  answer:
+    "Choose how you want to learn, then send a question. Velo can explain the idea, guide you with one step at a time, or prepare a visual model.",
+  nextStep: "Try one of the prompts below, or write your own.",
+};
+
+const TUTOR_MODES = ["explain", "guide", "visualize", "interactive"];
+const createInitialOutputCards = () =>
+  Object.fromEntries(
+    TUTOR_MODES.map((mode) => [mode, { visible: true, result: INITIAL_TUTOR_RESULT }]),
+  );
+
 const superscriptCharacters = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", n: "ⁿ", i: "ⁱ" };
 const subscriptCharacters = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
 const mathSymbols = { alpha: "α", beta: "β", gamma: "γ", delta: "δ", theta: "θ", lambda: "λ", mu: "μ", pi: "π", rho: "ρ", sigma: "σ", phi: "φ", omega: "ω", Delta: "Δ", Gamma: "Γ", Sigma: "Σ", Omega: "Ω", times: "×", cdot: "·", pm: "±", sqrt: "√", partial: "∂", nabla: "∇", infty: "∞", approx: "≈", neq: "≠", leq: "≤", geq: "≥" };
@@ -58,8 +71,82 @@ function formatEquation(latex = "") {
   return result.replace(/_\s*(?:\{([^{}]+)\}|([^\s]))/g, (_, grouped, single) => [...(grouped || single)].map((character) => subscriptCharacters[character] || character).join(""));
 }
 
-function renderEquation(latex = "") {
-  return { __html: katex.renderToString(latex, { displayMode: true, throwOnError: false, strict: "ignore", trust: false }) };
+function renderEquation(latex = "", { displayMode = true } = {}) {
+  return { __html: katex.renderToString(latex, { displayMode, throwOnError: false, strict: "ignore", trust: false }) };
+}
+
+const mathDelimiterPattern = /(\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$)/g;
+const inlineMarkdownPattern = /(\*\*[^*\n]+\*\*|\x60[^\x60\n]+\x60|\*[^*\n]+\*)/g;
+
+function unwrapMathDelimiters(value = "") {
+  const text = value.trim();
+  if (text.startsWith("$$") && text.endsWith("$$")) return { latex: text.slice(2, -2).trim(), displayMode: true };
+  if (text.startsWith("\\[") && text.endsWith("\\]")) return { latex: text.slice(2, -2).trim(), displayMode: true };
+  if (text.startsWith("\\(") && text.endsWith("\\)")) return { latex: text.slice(2, -2).trim(), displayMode: false };
+  return null;
+}
+
+function equationLatex(section) {
+  return (unwrapMathDelimiters(section?.latex || "")?.latex || section?.latex || section?.text || "").trim();
+}
+
+function renderInlineContent(text = "", keyPrefix = "text") {
+  return String(text).split(mathDelimiterPattern).flatMap((part, mathIndex) => {
+    const math = unwrapMathDelimiters(part);
+    if (math) return [<span key={[keyPrefix, "math", mathIndex].join("-")} className={math.displayMode ? "math-display" : "math-inline"} dangerouslySetInnerHTML={renderEquation(math.latex, { displayMode: math.displayMode })} />];
+    return part.split(inlineMarkdownPattern).map((token, markdownIndex) => {
+      const key = [keyPrefix, mathIndex, markdownIndex].join("-");
+      if (token.startsWith("**") && token.endsWith("**")) return <strong key={key}>{token.slice(2, -2)}</strong>;
+      if (token.startsWith(String.fromCharCode(96)) && token.endsWith(String.fromCharCode(96))) return <code key={key} className="markdown-inline-code">{token.slice(1, -1)}</code>;
+      if (token.startsWith("*") && token.endsWith("*")) return <em key={key}>{token.slice(1, -1)}</em>;
+      return token;
+    });
+  });
+}
+
+function MarkdownContent({ text }) {
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    if (!lines[index].trim()) {
+      index += 1;
+      continue;
+    }
+    const bullet = lines[index].match(/^\s*[-+*]\s+(.+)$/);
+    const numbered = lines[index].match(/^\s*\d+\.\s+(.+)$/);
+    if (bullet || numbered) {
+      const listItems = [];
+      const pattern = bullet ? /^\s*[-+*]\s+(.+)$/ : /^\s*\d+\.\s+(.+)$/;
+      while (index < lines.length) {
+        const match = lines[index].match(pattern);
+        if (!match) break;
+        listItems.push(match[1]);
+        index += 1;
+      }
+      const List = bullet ? "ul" : "ol";
+      blocks.push(<List key={["list", index].join("-")} className="markdown-list">{listItems.map((item, itemIndex) => <li key={[index, itemIndex].join("-")}>{renderInlineContent(item, ["list", index, itemIndex].join("-"))}</li>)}</List>);
+      continue;
+    }
+    const paragraph = [];
+    while (index < lines.length && lines[index].trim() && !lines[index].match(/^\s*[-+*]\s+(.+)$/) && !lines[index].match(/^\s*\d+\.\s+(.+)$/)) {
+      paragraph.push(lines[index]);
+      index += 1;
+    }
+    blocks.push(<p key={["paragraph", index].join("-")}>{paragraph.flatMap((line, lineIndex) => [lineIndex > 0 ? <br key={["break", index, lineIndex].join("-")} /> : null, ...renderInlineContent(line, ["paragraph", index, lineIndex].join("-"))])}</p>);
+  }
+
+  return blocks;
+}
+
+function ExplanationSectionContent({ section }) {
+  if (section.kind === "equation") {
+    const latex = equationLatex(section);
+    const description = section.latex && section.text && section.text.trim() !== section.latex.trim() ? section.text : "";
+    return <>{latex && <div className="equation" aria-label={section.spokenText} dangerouslySetInnerHTML={renderEquation(latex)} />}{description && <MarkdownContent text={description} />}</>;
+  }
+  return <MarkdownContent text={section.text || section.latex || ""} />;
 }
 
 const defaultProviderSettings = {
@@ -100,10 +187,62 @@ function ProviderSelect({ value, options, onChange }) {
   return <div className="provider-select"><button type="button" className="provider-select-trigger" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>{selected?.label || "Not configured"}<CaretDown weight="bold" /></button>{open && <div className="provider-select-menu" role="listbox"><button type="button" role="option" aria-selected={!value} onClick={() => { onChange(""); setOpen(false); }}>Not configured</button>{options.map((option) => <button key={option.id} type="button" role="option" aria-selected={option.id === value} onClick={() => { onChange(option.id); setOpen(false); }}>{option.label}</button>)}</div>}</div>;
 }
 
+const explanationSectionLabels = {
+  intuition: "Intuition",
+  detail: "Detail",
+  equation: "Equation",
+  example: "Example",
+  assumptions: "Assumptions",
+  recap: "Recap",
+  definition: "Definition",
+  derivation: "Derivation",
+  units: "Units",
+  limitations: "Limitations",
+  text: "Explanation",
+};
+
+function explanationSectionLabel(kind) {
+  const normalized = typeof kind === "string" ? kind.trim().toLowerCase() : "";
+  if (explanationSectionLabels[normalized]) return explanationSectionLabels[normalized];
+  return normalized ? normalized.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Explanation";
+}
+
 function TurnReview({ turn, onReturn }) {
+  const [reviewLevel, setReviewLevel] = useState("structured");
   const response = turn.response || {};
-  const sections = Array.isArray(response.sections) ? response.sections : [];
-  return <section className="turn-review" aria-live="polite"><div><span>Viewing earlier response</span><button type="button" onClick={onReturn}>Return to latest</button></div><p className="turn-review-prompt">{turn.prompt}</p>{response.title && <h2>{response.title}</h2>}{response.summary && <p>{response.summary}</p>}{sections.map((section, index) => <article key={`${section.kind}-${index}`}><strong>{section.kind}</strong><p>{section.text || section.latex}</p></article>)}{response.currentQuestion && <article><strong>Guide question</strong><p>{response.currentQuestion}</p>{response.message?.feedback && <p>{response.message.feedback}</p>}</article>}{!response.title && !response.currentQuestion && response.message?.feedback && <p>{response.message.feedback}</p>}</section>;
+  const hasVariants = Boolean(response.variants);
+  const activeResponse = response.variants?.[reviewLevel] || response;
+  const sections = Array.isArray(activeResponse.sections) ? activeResponse.sections : [];
+
+  useEffect(() => setReviewLevel("structured"), [turn.id]);
+
+  return (
+    <section className="turn-review" aria-live="polite">
+      <div className="turn-review-header">
+        <span>Viewing earlier response</span>
+        <button type="button" onClick={onReturn}>Return to latest</button>
+      </div>
+      <p className="turn-review-prompt">{turn.prompt}</p>
+      {hasVariants && (
+        <div className="turn-review-levels level-controls" aria-label="Explanation depth">
+          <button type="button" className={reviewLevel === "simpler" ? "active" : ""} onClick={() => setReviewLevel("simpler")}>Simpler</button>
+          <button type="button" className={reviewLevel === "structured" ? "active" : ""} onClick={() => setReviewLevel("structured")}>Structured</button>
+          <button type="button" className={reviewLevel === "technical" ? "active" : ""} onClick={() => setReviewLevel("technical")}>More technical</button>
+        </div>
+      )}
+      {(activeResponse.title || response.title) && <h2>{activeResponse.title || response.title}</h2>}
+      {(activeResponse.summary || response.summary) && <p>{activeResponse.summary || response.summary}</p>}
+      {sections.map((section, index) => (
+        <article key={`${section.kind}-${index}`}>
+          <strong>{explanationSectionLabel(section.kind)}</strong>
+          <ExplanationSectionContent section={section} />
+        </article>
+      ))}
+      {activeResponse.checkQuestion && <article><strong>Check your understanding</strong><p>{activeResponse.checkQuestion}</p></article>}
+      {response.currentQuestion && <article><strong>Guide question</strong><p>{response.currentQuestion}</p>{response.message?.feedback && <p>{response.message.feedback}</p>}</article>}
+      {!response.title && !response.currentQuestion && response.message?.feedback && <p>{response.message.feedback}</p>}
+    </section>
+  );
 }
 
 function WorkspaceDrawer({ open, onClose, groups, activeIds, onOpen, onNew, onDelete }) {
@@ -360,11 +499,8 @@ function ExplainResponse({
           key={`${section.kind}-${index}`}
         >
           <div>
-            <span>{section.kind}</span>
-            {section.kind === "equation" && (
-              <div className="equation" aria-label={section.spokenText} dangerouslySetInnerHTML={renderEquation(section.latex)} />
-            )}
-            {section.text && <p>{section.text}</p>}
+            <span>{explanationSectionLabel(section.kind)}</span>
+            <ExplanationSectionContent section={section} />
           </div>
           <button
             className="section-listen"
@@ -442,6 +578,8 @@ function Tutor({ onBack, theme, onToggleTheme }) {
   const [mode, setMode] = useState("explain");
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadingMode, setLoadingMode] = useState(null);
+  const [outputCards, setOutputCards] = useState(createInitialOutputCards);
   const [speaking, setSpeaking] = useState(false);
   const [speechState, setSpeechState] = useState({ status: "idle", rate: 1 });
   const [learnerLevel, setLearnerLevel] = useState("current");
@@ -475,12 +613,24 @@ function Tutor({ onBack, theme, onToggleTheme }) {
   const utteranceRef = useRef(null);
   const voiceOrbCoreRef = useRef(null);
   const voiceOrbPulseTimerRef = useRef(null);
-  const [result, setResult] = useState({
-    title: "Ask anything about physics",
-    answer:
-      "Choose how you want to learn, then send a question. Velo can explain the idea, guide you with one step at a time, or prepare a visual model.",
-    nextStep: "Try one of the prompts below, or write your own.",
-  });
+  const [result, setResult] = useState(INITIAL_TUTOR_RESULT);
+  const activeOutputCard = outputCards[mode] || {
+    visible: true,
+    result: INITIAL_TUTOR_RESULT,
+  };
+  const isOutputCardLoading = loading && loadingMode === mode;
+  function setOutputCard(modeId, updates) {
+    setOutputCards((current) => ({
+      ...current,
+      [modeId]: {
+        ...(current[modeId] || {
+          visible: true,
+          result: INITIAL_TUTOR_RESULT,
+        }),
+        ...updates,
+      },
+    }));
+  }
   useLayoutEffect(() => {
     const input = inputRef.current;
     if (!input) return;
@@ -537,7 +687,8 @@ function Tutor({ onBack, theme, onToggleTheme }) {
     const workspace = await response.json();
     const latest = workspace.turns.at(-1);
     setActiveWorkspaceIds((current) => ({ ...current, tutor: workspace.id }));
-    setMode(latest?.mode === "guide" ? "guide" : "explain"); setTutorWorkspace(workspace); setTutorTurnIndex(Math.max(0, workspace.turns.length - 1));
+    const workspaceMode = latest?.mode === "guide" ? "guide" : "explain";
+    setMode(workspaceMode); setTutorWorkspace(workspace); setTutorTurnIndex(Math.max(0, workspace.turns.length - 1)); setOutputCard(workspaceMode, { visible: false });
     if (latest?.mode === "guide" && latest.response) setGuideSession(latest.response);
     if (latest?.mode === "explain" && latest.response) setExplanation(latest.response);
     setWorkspaceDrawerOpen(false);
@@ -545,7 +696,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
   function newWorkspace() {
     setActiveWorkspaceIds((current) => ({ ...current, tutor: null }));
     setPrompt("");
-    setMode("explain"); setTutorWorkspace(null); setTutorTurnIndex(null); setExplanation(null); setGuideSession(null); setExplainSessionId(""); sessionStorage.removeItem("velo-explain-session");
+    setMode("explain"); setTutorWorkspace(null); setTutorTurnIndex(null); setExplanation(null); setGuideSession(null); setExplainSessionId(""); setResult(INITIAL_TUTOR_RESULT); setOutputCards(createInitialOutputCards()); sessionStorage.removeItem("velo-explain-session");
     setWorkspaceDrawerOpen(false);
   }
   async function deleteWorkspace(thread) {
@@ -899,12 +1050,16 @@ function Tutor({ onBack, theme, onToggleTheme }) {
         setMode("visualize");
         setPrompt(session.message?.visualPrompt || guideSession.prompt);
       } else if (action === "answer") setPrompt("");
+      return true;
     } catch (error) {
-      setResult({
+      const guideError = {
         title: "Guide interrupted",
         answer: error.message,
         nextStep: "Try again in a moment.",
-      });
+      };
+      setResult(guideError);
+      setOutputCard("guide", { visible: true, result: guideError });
+      return false;
     }
   }
   async function startGuideOver() {
@@ -949,25 +1104,29 @@ function Tutor({ onBack, theme, onToggleTheme }) {
     event?.preventDefault();
     const question = prompt.trim();
     if (!question || loading) return;
+    const submittedMode = mode;
     window.speechSynthesis?.cancel();
     setSpeaking(false);
     setLoading(true);
+    setLoadingMode(submittedMode);
+    setOutputCard(submittedMode, { visible: true });
     setPrompt("");
     try {
-      if (mode === "explain") {
+      let requestSucceeded = true;
+      if (submittedMode === "explain") {
         await streamExplain(question);
-      } else if (mode === "guide") {
-        if (guideSession) await guideAction("answer", question);
+      } else if (submittedMode === "guide") {
+        if (guideSession) requestSucceeded = await guideAction("answer", question);
         else await startGuide(question);
-      } else if (mode === "visualize") {
+      } else if (submittedMode === "visualize") {
         await generateAnimation(question);
-      } else if (mode === "interactive") {
+      } else if (submittedMode === "interactive") {
         await generateInteractive(question);
       } else {
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ prompt: question, mode, ...settings.base }),
+          body: JSON.stringify({ prompt: question, mode: submittedMode, ...settings.base }),
         });
         const data = await response.json();
         if (!response.ok)
@@ -975,17 +1134,21 @@ function Tutor({ onBack, theme, onToggleTheme }) {
             data.error?.message ||
               data.error ||
               "Velo could not answer that yet.",
-          );
+        );
         setResult(data);
       }
+      if (requestSucceeded) setOutputCard(submittedMode, { visible: false });
     } catch (error) {
-      setResult({
+      const requestError = {
         title: "Connection interrupted",
         answer: error.message,
         nextStep: "Make sure the local backend is running, then try again.",
-      });
+      };
+      setResult(requestError);
+      setOutputCard(submittedMode, { visible: true, result: requestError });
     } finally {
       setLoading(false);
+      setLoadingMode(null);
     }
   }
 
@@ -1085,15 +1248,16 @@ function Tutor({ onBack, theme, onToggleTheme }) {
           </button>
           <span>{speaking ? "Speaking — tap to stop" : "Listen"}</span>
         </section>
+        {activeOutputCard.visible && (
         <section
-          className={`output-card ${loading ? "loading" : ""}`}
+          className={`output-card ${isOutputCardLoading ? "loading" : ""}`}
           aria-live="polite"
-          aria-busy={loading}
+          aria-busy={isOutputCardLoading}
         >
           <div className="output-label">
             <Sparkle weight="fill" /> VELO
           </div>
-          {loading ? (
+          {isOutputCardLoading ? (
             <div className="thinking">
               <span />
               <span />
@@ -1102,15 +1266,15 @@ function Tutor({ onBack, theme, onToggleTheme }) {
             </div>
           ) : (
             <div className="output-copy">
-              <h1>{result.title}</h1>
-              <p>{result.answer}</p>
-              {result.nextStep && (
+              <h1>{activeOutputCard.result.title}</h1>
+              <p>{activeOutputCard.result.answer}</p>
+              {activeOutputCard.result.nextStep && (
                 <div className="next-step">
                   <CheckCircle weight="fill" />
-                  <span>{result.nextStep}</span>
+                  <span>{activeOutputCard.result.nextStep}</span>
                 </div>
               )}
-              {result.motionforge && (
+              {activeOutputCard.result.motionforge && (
                 <div className="motionforge-note">
                   <Waveform weight="duotone" />
                   <span>MotionForge scene prepared</span>
@@ -1119,6 +1283,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
             </div>
           )}
         </section>
+        )}
 
         {viewingEarlierTutorTurn && selectedTutorTurn && (
           <TurnReview turn={selectedTutorTurn} onReturn={() => { window.speechSynthesis?.cancel(); setTutorTurnIndex(latestTutorTurnIndex); }} />

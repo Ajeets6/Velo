@@ -22,6 +22,13 @@ export function loadConfig(env = process.env, root = process.cwd()) {
   const dataDir = env.VELO_DATA_DIR || path.join(env.LOCALAPPDATA || env.APPDATA || path.join(os.homedir(), ".local", "share"), "Velo");
   return Object.freeze({
     port: positiveInteger(env.VELO_API_PORT, 8787, "VELO_API_PORT", 65535),
+    localApiToken: env.VELO_LOCAL_API_TOKEN || "",
+    maxRequestBytes: positiveInteger(env.VELO_MAX_REQUEST_BYTES, 1048576, "VELO_MAX_REQUEST_BYTES", 10485760),
+    apiRateLimitWindowMs: positiveInteger(env.VELO_RATE_LIMIT_WINDOW_MS, 60000, "VELO_RATE_LIMIT_WINDOW_MS", 3600000),
+    apiRateLimitMaxRequests: positiveInteger(env.VELO_RATE_LIMIT_MAX_REQUESTS, 30, "VELO_RATE_LIMIT_MAX_REQUESTS", 10000),
+    maxConcurrentModelRequests: positiveInteger(env.VELO_MAX_CONCURRENT_MODEL_REQUESTS, 6, "VELO_MAX_CONCURRENT_MODEL_REQUESTS", 64),
+    modelPayloadLoggingEnabled: env.VELO_MODEL_PAYLOAD_LOGGING === "true",
+    dataRetentionDays: positiveInteger(env.VELO_DATA_RETENTION_DAYS, 30, "VELO_DATA_RETENTION_DAYS", 3650),
     provider,
     ollamaBaseUrl: env.OLLAMA_BASE_URL || "http://127.0.0.1:11434",
     ollamaModel: env.OLLAMA_MODEL || "llama3.1",
@@ -35,7 +42,9 @@ export function loadConfig(env = process.env, root = process.cwd()) {
     motionForgeProvider,
     motionForgeModel: env.MOTIONFORGE_MODEL || "gpt-oss:120b-cloud",
     motionForgeStartupMs: positiveInteger(env.MOTIONFORGE_STARTUP_MS, 10000, "MOTIONFORGE_STARTUP_MS", 60000),
+    motionForgeRequestTimeoutMs: positiveInteger(env.MOTIONFORGE_REQUEST_TIMEOUT_MS, 60000, "MOTIONFORGE_REQUEST_TIMEOUT_MS", 300000),
     renderConcurrency: positiveInteger(env.VELO_RENDER_CONCURRENCY, 1, "VELO_RENDER_CONCURRENCY", 8),
+    maxQueuedAnimationJobs: positiveInteger(env.VELO_MAX_QUEUED_ANIMATION_JOBS, 8, "VELO_MAX_QUEUED_ANIMATION_JOBS", 1000),
     compileTimeoutMs: positiveInteger(env.VELO_COMPILE_TIMEOUT_MS, 120000, "VELO_COMPILE_TIMEOUT_MS"),
     simulationTimeoutMs: positiveInteger(env.VELO_SIMULATION_TIMEOUT_MS, 180000, "VELO_SIMULATION_TIMEOUT_MS"),
     exportTimeoutMs: positiveInteger(env.VELO_EXPORT_TIMEOUT_MS, 300000, "VELO_EXPORT_TIMEOUT_MS"),

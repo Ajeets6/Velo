@@ -1,12 +1,42 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { VeloError } from "./errors.mjs";
+import { ensurePrivateDataDirectory } from "./private-data.mjs";
 
 const terminalStatuses = new Set(["complete", "failed", "cancelled"]);
 const timestamp = () => new Date().toISOString();
+const MAX_PROCESS_DIAGNOSTIC_CHARS = 2048;
+const SENSITIVE_ENVIRONMENT_KEY = /authorization|password|secret|token|api.?key/i;
+
+function appendDiagnosticTail(current, chunk) {
+  return `${current}${chunk.toString("utf8")}`.slice(-MAX_PROCESS_DIAGNOSTIC_CHARS);
+}
+
+function redactDiagnostic(text, valuesToRedact = []) {
+  let result = text;
+  for (const value of valuesToRedact) {
+    if (typeof value === "string" && value) result = result.split(value).join("[redacted]");
+  }
+  return result
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]+/g, "sk-[redacted]")
+    .replace(/\b(authorization|api.?key|token|password|secret)\b\s*(?:=|:)\s*[^\s,;]+/gi, "$1: [redacted]")
+    .replace(/https?:\/\/[^\s,;]+/gi, "[redacted-url]")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(-MAX_PROCESS_DIAGNOSTIC_CHARS);
+}
+
+function processFailureMessage(code, signal, outputExists) {
+  if (typeof code === "number" && code !== 0) return `MotionForge exited with code ${code}.`;
+  if (signal) return `MotionForge ended after receiving ${signal}.`;
+  if (!outputExists) return "MotionForge finished without creating the animation file.";
+  return "MotionForge could not complete the animation.";
+}
 
 function terminateProcessTree(child) {
   if (process.platform === "win32" && child.pid) {
@@ -33,9 +63,10 @@ export class AnimationJobManager {
     this.environmentForProvider = environmentForProvider;
     this.running = new Map();
     this.pendingPrompts = new Map();
-    mkdirSync(config.dataDir, { recursive: true });
-    mkdirSync(config.rendersRoot, { recursive: true });
+    ensurePrivateDataDirectory(config.dataDir);
+    ensurePrivateDataDirectory(config.rendersRoot);
     this.db = new DatabaseSync(config.databasePath);
+    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
     this.migrate();
     this.recoverInterrupted();
     this.cleanup();
@@ -69,6 +100,7 @@ export class AnimationJobManager {
     clearInterval(this.cleanupTimer);
     for (const execution of this.running.values()) {
       clearTimeout(execution.timer);
+      clearInterval(execution.sizeTimer);
       execution.terminating = true;
       try { this.terminate(execution.child); } catch {}
     }
@@ -98,6 +130,8 @@ export class AnimationJobManager {
   }
 
   create(prompt, selection = { provider: this.config.motionForgeProvider || "ollama", model: this.config.motionForgeModel }, { executionPrompt = prompt } = {}) {
+    const activeJobs = this.db.prepare("SELECT COUNT(*) AS count FROM animation_jobs WHERE status IN ('queued', 'running')").get().count;
+    if (activeJobs >= (this.config.maxQueuedAnimationJobs ?? 8)) throw new VeloError("RATE_LIMITED", "Too many animations are already queued. Wait for one to finish before starting another.");
     const id = randomUUID();
     const outputPath = managedPath(this.config.rendersRoot, path.join(this.config.rendersRoot, id, "animation.mp4"));
     const time = timestamp();
@@ -140,12 +174,12 @@ export class AnimationJobManager {
     if (!job || job.status !== "queued") return;
     if (!existsSync(this.config.motionForgeExecutable)) return this.fail(id, "MOTIONFORGE_UNAVAILABLE", "MotionForge is not installed or configured.");
     const outputDirectory = managedPath(this.config.rendersRoot, path.dirname(job.output_path));
-    mkdirSync(outputDirectory, { recursive: true });
+    ensurePrivateDataDirectory(outputDirectory);
     this.update(id, { status: "running", stage: "Compiling the scene", started_at: timestamp(), error_code: null, error_message: null });
     const prompt = this.pendingPrompts.get(id);
     if (!prompt) return this.fail(id, "CANCELLED", "The application restarted before this queued animation could begin.");
     this.pendingPrompts.delete(id);
-    const execution = { child: null, timer: null, stage: "compiling", terminating: false };
+    const execution = { child: null, timer: null, sizeTimer: null, stage: "compiling", terminating: false, stderrTail: "" };
     this.running.set(id, execution);
     this.armTimeout(id, "compiling");
     let environment;
@@ -155,24 +189,40 @@ export class AnimationJobManager {
     const animationPrompt = `Create a clear, short educational physics animation for this request: ${prompt}. Use a white background, readable labels, physically plausible values, a duration of 2 to 3 seconds, and simple primitive shapes.`;
     const child = this.spawnProcess(this.config.motionForgeExecutable, [animationPrompt, "--provider", job.provider || this.config.motionForgeProvider || "ollama", "--model", job.model || this.config.motionForgeModel, "--quality", "low", "--output", job.output_path.slice(0, -4)], { cwd: outputDirectory, windowsHide: true, env: environment });
     execution.child = child;
+    execution.sizeTimer = setInterval(() => {
+      try {
+        if (existsSync(job.output_path) && statSync(job.output_path).size > this.config.maxRenderBytes) this.fail(id, "DISK_FULL", "The animation exceeded Velo's configured render size limit.");
+      } catch {}
+    }, 1000);
+    execution.sizeTimer.unref();
     const handleOutput = (chunk) => {
       const text = chunk.toString();
       if (text.includes("[2/4]")) this.setStage(id, "simulating", "Simulating the physics");
       else if (text.includes("[3/4]")) this.setStage(id, "simulating", "Building the timeline");
       else if (text.includes("[4/4]")) this.setStage(id, "exporting", "Rendering the animation");
     };
-    child.stdout?.on("data", handleOutput); child.stderr?.on("data", handleOutput);
+    const handleErrorOutput = (chunk) => {
+      execution.stderrTail = appendDiagnosticTail(execution.stderrTail, chunk);
+      handleOutput(chunk);
+    };
+    child.stdout?.on("data", handleOutput); child.stderr?.on("data", handleErrorOutput);
     child.on("error", () => this.fail(id, "MOTIONFORGE_UNAVAILABLE", "MotionForge could not start."));
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       if (!this.running.has(id) || this.running.get(id).terminating) return;
-      if (code === 0 && existsSync(job.output_path)) this.finish(id, { status: "complete", stage: "Animation ready", output_size: statSync(job.output_path).size, completed_at: timestamp() });
-      else this.fail(id, "EXPORT_FAILED", "MotionForge could not complete the animation.");
+      const outputExists = existsSync(job.output_path);
+      if (code === 0 && outputExists) this.finish(id, { status: "complete", stage: "Animation ready", output_size: statSync(job.output_path).size, completed_at: timestamp() });
+      else {
+        const sensitiveValues = [prompt, animationPrompt, ...Object.entries(environment || {}).filter(([key]) => SENSITIVE_ENVIRONMENT_KEY.test(key)).map(([, value]) => value)];
+        const stderrTail = redactDiagnostic(execution.stderrTail, sensitiveValues);
+        this.log("warn", "motionforge_animation_failed", { jobId: id, exitCode: code, signal, outputExists, ...(stderrTail ? { stderrTail } : {}) });
+        this.fail(id, "EXPORT_FAILED", processFailureMessage(code, signal, outputExists));
+      }
     });
   }
 
   finish(id, fields) {
     const execution = this.running.get(id);
-    if (execution) { clearTimeout(execution.timer); this.running.delete(id); }
+    if (execution) { clearTimeout(execution.timer); clearInterval(execution.sizeTimer); this.running.delete(id); }
     this.update(id, fields);
     this.log("info", "animation_finished", { jobId: id, status: fields.status, code: fields.error_code });
     this.pump();

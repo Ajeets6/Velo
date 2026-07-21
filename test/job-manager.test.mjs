@@ -50,6 +50,33 @@ test("marks timed-out work with a stable error and releases the queue", async ()
   assert.equal(result.error.code, "TIMEOUT");
 }));
 
+test("logs a bounded, redacted MotionForge diagnostic and a safe exit code", async () => {
+  const events = [];
+  await withManager(async ({ manager, children }) => {
+    const prompt = "A learner's private animation prompt";
+    const job = manager.create(prompt);
+    await new Promise((resolve) => setImmediate(resolve));
+    children[0].stderr.emit("data", Buffer.from(`Scene creation failed for ${prompt}. Authorization: Bearer test-secret-token`));
+    children[0].emit("exit", 2);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(manager.get(job.id).error, {
+      code: "EXPORT_FAILED",
+      message: "MotionForge exited with code 2.",
+    });
+  }, {}, { log: (level, event, fields) => events.push({ level, event, fields }) });
+
+  const diagnostic = events.find((entry) => entry.event === "motionforge_animation_failed");
+  assert.deepEqual({ level: diagnostic.level, event: diagnostic.event, exitCode: diagnostic.fields.exitCode, outputExists: diagnostic.fields.outputExists }, {
+    level: "warn",
+    event: "motionforge_animation_failed",
+    exitCode: 2,
+    outputExists: false,
+  });
+  assert.doesNotMatch(diagnostic.fields.stderrTail, /private animation prompt|test-secret-token/);
+  assert.match(diagnostic.fields.stderrTail, /\[redacted\]/);
+});
+
 test("recovers interrupted jobs from SQLite on startup", async () => withManager(async ({ manager, config }) => {
   manager.db.prepare("INSERT INTO animation_jobs(id, prompt_hash, prompt, status, stage, output_path, created_at, updated_at, cleanup_after) VALUES ('interrupted', 'hash', 'saved prompt', 'running', 'Simulating', ?, ?, ?, ?)").run(path.join(config.rendersRoot, "interrupted", "animation.mp4"), new Date().toISOString(), new Date().toISOString(), new Date(Date.now() + 100000).toISOString());
   manager.close();

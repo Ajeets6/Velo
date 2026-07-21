@@ -1,15 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ModelRequestPayloadStore } from "../backend/model-request-payloads.mjs";
 import { createOllamaProvider } from "../backend/providers.mjs";
 
-test("stores the complete request before sending and the raw response after receiving", async () => {
+test("diagnostic model payload capture is disabled by default", async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "velo-model-payloads-"));
   try {
     const store = new ModelRequestPayloadStore({ dataDir });
+    const capture = await store.begin({ provider: "ollama", model: "physics-test", method: "POST", url: "http://127.0.0.1", body: "private prompt" });
+    await capture.complete({ status: 200, body: "private response" });
+    await assert.rejects(access(path.join(dataDir, "model_requests_payload.jsonl")));
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
+});
+
+test("stores the complete request before sending and the raw response after receiving", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "velo-model-payloads-"));
+  try {
+    const store = new ModelRequestPayloadStore({ dataDir, enabled: true });
     const provider = createOllamaProvider({
       baseUrl: "http://127.0.0.1:11434",
       model: "physics-test",

@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { CONTRACT_VERSION, validateExplainResponse } from "./contracts.mjs";
+import { CONTRACT_VERSION, EXPLAIN_SECTION_KINDS, validateExplainResponse } from "./contracts.mjs";
+import { ensurePrivateDataDirectory } from "./private-data.mjs";
 
 const concepts = [
   { words: ["orbit", "satellite"], title: "Why satellites stay in orbit", topic: "orbits", visualSuggestion: "orbit", intuition: "A satellite is always falling toward Earth, but it is also moving sideways fast enough to keep missing the ground.", equation: "v²/r = GM/r²", spokenEquation: "speed squared divided by radius equals gravitational constant times mass divided by radius squared", definition: "The radius is the distance from Earth’s centre; v is orbital speed; G and M describe Earth’s gravity.", example: "Lower orbits need more sideways speed because the curve is tighter." },
@@ -39,12 +39,16 @@ const explainSchema = {
       additionalProperties: false,
       required: ["kind"],
       properties: {
-        kind: { type: "string", minLength: 1 },
+        kind: { type: "string", enum: EXPLAIN_SECTION_KINDS },
         text: { type: "string", minLength: 1 },
         latex: { type: "string", minLength: 1 },
         spokenText: { type: "string", minLength: 1 },
       },
       anyOf: [{ required: ["text"] }, { required: ["latex"] }],
+      allOf: [{
+        if: { properties: { kind: { const: "equation" } }, required: ["kind"] },
+        then: { required: ["latex"] },
+      }],
     },
     variant: {
       type: "object",
@@ -63,12 +67,107 @@ const explainSchema = {
 const explainVariantSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["contractVersion", "mode", "title", "summary", "sections", "spokenText"],
+  required: ["summary", "sections"],
   properties: {
-    contractVersion: { const: CONTRACT_VERSION }, mode: { const: "explain" }, title: { type: "string", minLength: 1 }, summary: { type: "string", minLength: 1 }, sections: { type: "array", minItems: 1, items: { $ref: "#/$defs/section" } }, checkQuestion: { type: "string", minLength: 1 }, spokenText: { type: "string", minLength: 1 }, visualSuggestion: { type: ["string", "null"] },
+    title: { type: "string", minLength: 1 }, summary: { type: "string", minLength: 1 }, sections: { type: "array", minItems: 1, items: { $ref: "#/$defs/section" } }, checkQuestion: { type: "string", minLength: 1 }, spokenText: { type: "string", minLength: 1 },
   },
   $defs: explainSchema.$defs,
 };
+
+const sectionKindsByVariant = {
+  simpler: ["intuition", "example", "equation"],
+  structured: ["intuition", "detail", "equation", "example", "assumptions", "recap"],
+  technical: ["definition", "assumptions", "equation", "derivation", "units", "limitations", "example"],
+};
+
+const equationFormattingInstruction = "Math formatting: Velo renders formulas with KaTeX. Put every standalone formula in a section whose kind is equation and whose latex value is raw, KaTeX-compatible LaTeX—for example, \\vec{v} = \\frac{d\\vec{r}}{dt}. Do not wrap that latex value in $, $$, \\(...\\), or \\[...\\]. Do not put unmarked formulas in text. If math must appear inside a sentence, wrap it with \\(...\\) for inline math or \\[...\\] for display math.";
+const textFormattingInstruction = "Text formatting: Velo safely supports **bold**, *italic*, inline code marked with one backtick on each side, and simple Markdown lists that start with - or 1. Use those only when they improve clarity. Do not use HTML, Markdown tables, or Markdown headings because the section labels are the headings.";
+
+function unwrapMathDelimiters(latex) {
+  const value = typeof latex === "string" ? latex.trim() : "";
+  if (value.startsWith("$$") && value.endsWith("$$")) return value.slice(2, -2).trim();
+  if (value.startsWith("\\[") && value.endsWith("\\]")) return value.slice(2, -2).trim();
+  if (value.startsWith("\\(") && value.endsWith("\\)")) return value.slice(2, -2).trim();
+  return value;
+}
+
+function normalizeEquationLatex(candidate) {
+  if (!candidate || !Array.isArray(candidate.sections)) return candidate;
+  return {
+    ...candidate,
+    sections: candidate.sections.map((section) => (
+      section?.kind === "equation" && typeof section.latex === "string"
+        ? { ...section, latex: unwrapMathDelimiters(section.latex) }
+        : section
+    )),
+  };
+}
+
+function schemaForVariant(sectionKinds, { requireTitle = false } = {}) {
+  return {
+    ...explainVariantSchema,
+    required: requireTitle
+      ? [...explainVariantSchema.required, "title"]
+      : explainVariantSchema.required,
+    $defs: {
+      ...explainVariantSchema.$defs,
+      section: {
+        ...explainVariantSchema.$defs.section,
+        properties: {
+          ...explainVariantSchema.$defs.section.properties,
+          kind: { type: "string", enum: sectionKinds },
+        },
+      },
+    },
+  };
+}
+
+function nonEmptyText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function spokenTextForSections(sections) {
+  if (!Array.isArray(sections)) return "";
+  return sections
+    .map((section) => (
+      nonEmptyText(section?.spokenText) ||
+      nonEmptyText(section?.text) ||
+      nonEmptyText(section?.latex)
+    ))
+    .filter(Boolean)
+    .join(" ");
+}
+
+function normalizeModelVariant(candidate) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+    return candidate;
+  const sections = Array.isArray(candidate.sections)
+    ? candidate.sections.map((section) => {
+      if (!section || typeof section !== "object" || Array.isArray(section))
+        return section;
+      const normalized = { ...section };
+      for (const field of ["text", "latex", "spokenText"]) {
+        if (typeof normalized[field] !== "string") continue;
+        const value = normalized[field].trim();
+        if (value) normalized[field] = value;
+        else delete normalized[field];
+      }
+      if (typeof normalized.kind === "string")
+        normalized.kind = normalized.kind.trim().toLowerCase();
+      return normalized;
+    })
+    : candidate.sections;
+  const normalized = { ...candidate, sections };
+  for (const field of ["title", "summary", "checkQuestion", "spokenText"]) {
+    if (typeof normalized[field] !== "string") continue;
+    const value = normalized[field].trim();
+    if (value) normalized[field] = value;
+    else delete normalized[field];
+  }
+  if (!normalized.spokenText)
+    normalized.spokenText = spokenTextForSections(sections);
+  return normalizeEquationLatex(normalized);
+}
 
 function chooseConcept(prompt) { const normal = prompt.toLowerCase(); return concepts.find((item) => item.words.some((word) => normal.includes(word))) || { title: "Let’s build a physics model", topic: "physics modelling", visualSuggestion: null, intuition: "Start by defining the system, what changes, and the quantity you want to find.", equation: "known values → principle → result", spokenEquation: "known values, then a physics principle, then a checked result", definition: "A useful model states assumptions and checks units and direction.", example: "For a moving object, list forces first, then decide which equation connects them to the unknown." }; }
 
@@ -115,11 +214,13 @@ function localExplainVariants(prompt, context) {
 
 export class ExplainService {
   constructor(config, { provider, log = () => {} } = {}) {
-    mkdirSync(config.dataDir, { recursive: true });
+    ensurePrivateDataDirectory(config.dataDir);
     this.db = new DatabaseSync(config.databasePath);
+    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
     this.provider = provider;
     this.log = log;
     this.db.exec("CREATE TABLE IF NOT EXISTS explain_sessions (id TEXT PRIMARY KEY, learner_level TEXT NOT NULL, topic TEXT, terminology TEXT NOT NULL, recent_prompts TEXT NOT NULL, updated_at TEXT NOT NULL)");
+    this.cleanup(config.dataRetentionDays ?? 30);
   }
   close() { this.db.close(); }
   context(id) {
@@ -136,14 +237,27 @@ export class ExplainService {
     let response = localExplainVariants(prompt, context);
     if (provider?.name !== "local" && provider?.generateStructured) {
       const instructions = {
-        simpler: "Write a simple, plain-language explanation. Use only relevant intuition and at most one everyday example. Avoid equations unless essential.",
-        structured: "Write a guided explanation. Use only relevant intuition, detail, equation, example, assumptions, recap, and checkQuestion sections.",
-        technical: "Write an in-depth explanation. Use only relevant definition, assumptions, equation, derivation, units, limitations, and example sections with precise terminology.",
+        simpler: "Write a simple, plain-language explanation. Tag each section as intuition, example, or equation. Use only relevant intuition and at most one everyday example. Avoid equations unless essential. Do not include a title.",
+        structured: "Write a guided explanation with a concise title. Tag each section as intuition, detail, equation, example, assumptions, or recap. Use only the relevant sections and include checkQuestion only when useful.",
+        technical: "Write an in-depth explanation. Tag each section as definition, assumptions, equation, derivation, units, limitations, or example. Use only the relevant sections and precise terminology. Do not include a title.",
       };
-      const valid = (candidate) => candidate?.contractVersion === CONTRACT_VERSION && candidate?.mode === "explain" && typeof candidate.title === "string" && typeof candidate.summary === "string" && typeof candidate.spokenText === "string" && Array.isArray(candidate.sections) && candidate.sections.length > 0 && candidate.sections.every((section) => typeof section?.kind === "string" && (typeof section.text === "string" || typeof section.latex === "string"));
+      const valid = (candidate, level) => Boolean(
+        candidate &&
+        (level !== "structured" || nonEmptyText(candidate.title)) &&
+        nonEmptyText(candidate.summary) &&
+        nonEmptyText(candidate.spokenText) &&
+        Array.isArray(candidate.sections) &&
+        candidate.sections.length > 0 &&
+        candidate.sections.every((section) =>
+          sectionKindsByVariant[level].includes(section?.kind) &&
+          (nonEmptyText(section.text) || nonEmptyText(section.latex)) &&
+          (section.kind !== "equation" || nonEmptyText(section.latex)),
+        ),
+      );
       const candidates = await Promise.all(Object.entries(instructions).map(async ([level, instruction]) => {
         try {
-          return [level, await provider.generateStructured({ prompt: `${instruction}\n\nQuestion: ${prompt}\nPrior topic: ${context.topic || "none"}. Return only this one explanation. Omit any field or tagged section that is not useful; never send empty strings or placeholders.`, mode: "explain", schema: explainVariantSchema })];
+          const candidate = await provider.generateStructured({ prompt: `${instruction}\n\n${equationFormattingInstruction}\n\n${textFormattingInstruction}\n\nThe server adds contractVersion, mode, variants, and visualSuggestion. Do not include those fields. Omit any field or tagged section that is not useful; never send empty strings or placeholders.\n\nQuestion: ${prompt}\nPrior topic: ${context.topic || "none"}. Return only this one explanation.`, mode: "explain", schema: schemaForVariant(sectionKindsByVariant[level], { requireTitle: level === "structured" }) });
+          return [level, normalizeModelVariant(candidate)];
         } catch {
           this.log("warn", "explain_variant_fallback", { sessionId: id, level });
           return [level, null];
@@ -151,12 +265,13 @@ export class ExplainService {
       }));
       const modelVariants = Object.fromEntries(candidates);
       const fallback = response;
-      const asVariant = (level) => valid(modelVariants[level]) ? { summary: modelVariants[level].summary, sections: modelVariants[level].sections, ...(modelVariants[level].checkQuestion ? { checkQuestion: modelVariants[level].checkQuestion } : {}), spokenText: modelVariants[level].spokenText } : fallback.variants[level];
-      const structured = valid(modelVariants.structured) ? modelVariants.structured : null;
+      const asVariant = (level) => valid(modelVariants[level], level) ? { summary: modelVariants[level].summary, sections: modelVariants[level].sections, ...(modelVariants[level].checkQuestion ? { checkQuestion: modelVariants[level].checkQuestion } : {}), spokenText: modelVariants[level].spokenText } : fallback.variants[level];
+      const structured = valid(modelVariants.structured, "structured") ? modelVariants.structured : null;
       const merged = { contractVersion: CONTRACT_VERSION, mode: "explain", title: structured?.title || fallback.title, summary: structured?.summary || fallback.summary, sections: structured?.sections || fallback.sections, checkQuestion: structured?.checkQuestion || fallback.checkQuestion, spokenText: structured?.spokenText || fallback.spokenText, visualSuggestion: structured?.visualSuggestion ?? fallback.visualSuggestion, variants: { simpler: asVariant("simpler"), structured: asVariant("structured"), technical: asVariant("technical") }, topic: chooseConcept(prompt).topic };
       if (validateExplainResponse(merged).ok) response = merged;
     }
     this.save(id, learnerLevel, response, prompt, context);
     return { sessionId: id, response };
   }
+  cleanup(retentionDays) { this.db.prepare("DELETE FROM explain_sessions WHERE updated_at < ?").run(new Date(Date.now() - retentionDays * 86400000).toISOString()); }
 }

@@ -1,20 +1,21 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { ensurePrivateDataDirectory, restrictFileToUser } from "./private-data.mjs";
 
-// This is a local diagnostic/audit log. It intentionally stores complete model
-// request and response bodies, so it must remain outside the repository and
-// must never receive credential headers or API keys.
+// This diagnostic capture contains complete model prompts and replies. It is
+// deliberately opt-in so normal use never persists that sensitive content.
 export class ModelRequestPayloadStore {
-  constructor({ dataDir, enabled = true } = {}) {
+  constructor({ dataDir, enabled = false } = {}) {
     this.enabled = enabled;
     this.filePath = dataDir ? path.join(dataDir, "model_requests_payload.jsonl") : null;
   }
 
   async append(record) {
     if (!this.enabled || !this.filePath) return;
-    await mkdir(path.dirname(this.filePath), { recursive: true });
-    await appendFile(this.filePath, `${JSON.stringify(record)}\n`, "utf8");
+    ensurePrivateDataDirectory(path.dirname(this.filePath));
+    await appendFile(this.filePath, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+    restrictFileToUser(this.filePath);
   }
 
   async begin({ provider, model, method, url, body }) {

@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
 import { VeloError } from "./errors.mjs";
+import { ensurePrivateDataDirectory } from "./private-data.mjs";
 
 const now = () => new Date().toISOString();
 const steps = [
@@ -21,11 +21,12 @@ function feedbackFor(answer, step) {
 
 export class GuideService {
   constructor(config, { log = () => {} } = {}) {
-    mkdirSync(config.dataDir, { recursive: true }); this.db = new DatabaseSync(config.databasePath); this.log = log;
+    ensurePrivateDataDirectory(config.dataDir); this.db = new DatabaseSync(config.databasePath); this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;"); this.log = log;
     this.db.exec("CREATE TABLE IF NOT EXISTS guide_sessions (id TEXT PRIMARY KEY, prompt TEXT NOT NULL, learner_level TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'local', model TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, outline TEXT NOT NULL, history TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
     const columns = this.db.prepare("PRAGMA table_info(guide_sessions)").all().map((column) => column.name);
     if (!columns.includes("provider")) this.db.exec("ALTER TABLE guide_sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'local'");
     if (!columns.includes("model")) this.db.exec("ALTER TABLE guide_sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''");
+    this.cleanup(config.dataRetentionDays ?? 30);
   }
   close() { this.db.close(); }
   row(id) { return this.db.prepare("SELECT * FROM guide_sessions WHERE id = ?").get(id); }
@@ -66,4 +67,5 @@ export class GuideService {
     return this.publicSession(this.row(id), message);
   }
   remove(id) { if (!this.row(id)) throw new VeloError("NOT_FOUND", "Guide session not found."); this.db.prepare("DELETE FROM guide_sessions WHERE id = ?").run(id); }
+  cleanup(retentionDays) { this.db.prepare("DELETE FROM guide_sessions WHERE updated_at < ?").run(new Date(Date.now() - retentionDays * 86400000).toISOString()); }
 }

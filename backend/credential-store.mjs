@@ -24,7 +24,7 @@ function validateKey(key) {
 
 function runLegacyWindowsCredential(action, provider) {
   return new Promise((resolve, reject) => {
-    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", windowsHelper, "-Action", action, "-Target", `Velo/${provider}`], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File", windowsHelper, "-Action", action, "-Target", `Velo/${provider}`], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
     let output = "";
     child.stdout.on("data", (chunk) => { output += chunk; });
     child.on("error", () => resolve(null));

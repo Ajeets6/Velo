@@ -4,11 +4,13 @@ export const CONTRACT_VERSION = 1;
 export const LEARNING_MODES = Object.freeze(["explain", "guide", "visualize"]);
 export const JOB_STATUSES = Object.freeze(["queued", "running", "complete", "failed", "cancelled"]);
 export const VISUALIZATION_STAGES = Object.freeze(["queued", "compiling", "validating", "simulating", "ready", "exporting", "failed", "cancelled"]);
+export const EXPLAIN_SECTION_KINDS = Object.freeze(["intuition", "detail", "equation", "example", "assumptions", "recap", "definition", "derivation", "units", "limitations"]);
 
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const isString = (value, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) => typeof value === "string" && value.length >= min && value.length <= max;
 const isStringArray = (value) => Array.isArray(value) && value.every((item) => isString(item));
 const issue = (path, message) => ({ path, message });
+const isExplainSectionKind = (value) => EXPLAIN_SECTION_KINDS.includes(value);
 
 function versionIssues(value) {
   return value.contractVersion === CONTRACT_VERSION ? [] : [issue("contractVersion", `must equal ${CONTRACT_VERSION}`)];
@@ -43,7 +45,9 @@ export function validateExplainResponse(value) {
   if (!Array.isArray(value.sections) || value.sections.length === 0) issues.push(issue("sections", "must contain at least one section"));
   else value.sections.forEach((section, index) => {
     if (!isRecord(section) || !isString(section.kind, { min: 1 })) issues.push(issue(`sections[${index}]`, "must have a kind"));
+    else if (!isExplainSectionKind(section.kind)) issues.push(issue(`sections[${index}].kind`, "is not a supported explanation section"));
     if (!isString(section?.text) && !isString(section?.latex)) issues.push(issue(`sections[${index}]`, "must have text or latex"));
+    if (section?.kind === "equation" && !isString(section.latex, { min: 1 })) issues.push(issue(`sections[${index}].latex`, "must contain KaTeX-compatible LaTeX for an equation"));
     if (section?.spokenText !== undefined && !isString(section.spokenText)) issues.push(issue(`sections[${index}].spokenText`, "must be a string"));
   });
   if (!isRecord(value.variants)) issues.push(issue("variants", "must contain simpler, structured, and technical variants"));
@@ -54,7 +58,9 @@ export function validateExplainResponse(value) {
     if (!Array.isArray(variant.sections) || variant.sections.length === 0) issues.push(issue(`variants.${level}.sections`, "must contain at least one section"));
     else variant.sections.forEach((section, index) => {
       if (!isRecord(section) || !isString(section.kind, { min: 1 })) issues.push(issue(`variants.${level}.sections[${index}]`, "must have a kind"));
+      else if (!isExplainSectionKind(section.kind)) issues.push(issue(`variants.${level}.sections[${index}].kind`, "is not a supported explanation section"));
       if (!isString(section?.text) && !isString(section?.latex)) issues.push(issue(`variants.${level}.sections[${index}]`, "must have text or latex"));
+      if (section?.kind === "equation" && !isString(section.latex, { min: 1 })) issues.push(issue(`variants.${level}.sections[${index}].latex`, "must contain KaTeX-compatible LaTeX for an equation"));
       if (section?.spokenText !== undefined && !isString(section.spokenText)) issues.push(issue(`variants.${level}.sections[${index}].spokenText`, "must be a string"));
     });
     if (variant.checkQuestion !== undefined && !isString(variant.checkQuestion, { min: 1 })) issues.push(issue(`variants.${level}.checkQuestion`, "must be a non-empty string when provided"));
@@ -101,6 +107,33 @@ export function validateGuideMessageRequest(value) {
   if (value.action !== undefined && !["answer", "hint", "explain", "skip", "visual"].includes(value.action)) issues.push(issue("action", "is not recognised"));
   if ((value.action || "answer") === "answer" && !isString(value.answer?.trim(), { min: 1, max: 2000 })) issues.push(issue("answer", "must be a non-empty response"));
   return result({ answer: value.answer?.trim() || "", action: value.action || "answer" }, issues);
+}
+
+export function validateVisualizationRequest(value) {
+  const issues = [];
+  if (!isRecord(value)) return result(value, [issue("body", "must be an object")]);
+  if (!isString(value.prompt?.trim(), { min: 1, max: 2000 })) issues.push(issue("prompt", "must be 1–2,000 characters"));
+  if (value.preferTemplate !== undefined && typeof value.preferTemplate !== "boolean") issues.push(issue("preferTemplate", "must be a boolean"));
+  return result({ prompt: value.prompt?.trim(), preferTemplate: value.preferTemplate === true }, issues);
+}
+
+export function validateVisualizationParametersRequest(value) {
+  const issues = [];
+  if (!isRecord(value) || !isRecord(value.parameters)) return result(value, [issue("parameters", "must be an object")]);
+  const entries = Object.entries(value.parameters);
+  if (entries.length < 1 || entries.length > 32) issues.push(issue("parameters", "must contain 1–32 values"));
+  for (const [key, parameter] of entries) {
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(key)) issues.push(issue(`parameters.${key}`, "has an invalid name"));
+    if (!Number.isFinite(parameter) || Math.abs(parameter) > 1000000) issues.push(issue(`parameters.${key}`, "must be a finite value between -1,000,000 and 1,000,000"));
+  }
+  return result({ parameters: Object.fromEntries(entries) }, issues);
+}
+
+export function validateVisualizationExportRequest(value) {
+  const issues = [];
+  if (!isRecord(value)) return result(value, [issue("body", "must be an object")]);
+  if (!isRecord(value.options) || value.options.preset !== "preview" || Object.keys(value.options).length !== 1) issues.push(issue("options", "must request the preview export preset"));
+  return result({ options: { preset: "preview" } }, issues);
 }
 
 export function validateVisualizationJob(value) {
