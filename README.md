@@ -10,6 +10,14 @@ GPT-5.6 is a development aid, not a runtime dependency. Velo still runs locally 
 
 ## Run locally
 
+Velo uses the packaged Prompt Animator from [MotionForge](https://github.com/Marri-Meghadri31/MotionForge) for visualization. Before starting Velo:
+
+1. Open the [latest MotionForge release](https://github.com/Marri-Meghadri31/MotionForge/releases/latest).
+2. Download the Windows Prompt Animator archive.
+3. Extract the archive's contents into the `vendor` directory. Keep the extracted layout intact; `vendor/prompt-animator.exe` and `vendor/_internal` must both exist.
+
+Then install the Node dependencies and start the web app:
+
 ```bash
 npm install
 npm run dev
@@ -27,7 +35,7 @@ The development command starts both the Vite frontend and the API. Open the loca
 - Credential-free physics responses work by default.
 - Cloud API keys are stored only in the operating system credential vault: Credential Manager on Windows, Keychain on macOS, and Secret Service on Linux. Linux users need an unlocked Secret Service-compatible keyring such as GNOME Keyring or KWallet; Velo does not fall back to plaintext key storage.
 - Set `VELO_PROVIDER=ollama` to use a local Ollama model. Optionally set `OLLAMA_BASE_URL` and `OLLAMA_MODEL`.
-- Visualize mode returns a `motionforge` scene prompt compatible with the sibling `MotionForge` pipeline at `G:\Git_repo\MotionForge`.
-- Visualize mode also runs `MotionForge\dist\prompt-animator.exe` with `gpt-oss:120b-cloud` and embeds the completed MP4 in the tutor UI. Override the executable or model with `MOTIONFORGE_EXECUTABLE` and `MOTIONFORGE_MODEL`.
+- Visualize mode returns a `motionforge` scene prompt compatible with the MotionForge pipeline.
+- Visualize mode runs `vendor/prompt-animator.exe` with `gpt-oss:120b-cloud` and embeds the completed MP4 in the tutor UI. Override the executable or model with `MOTIONFORGE_EXECUTABLE` and `MOTIONFORGE_MODEL`.
 
 The browser uses its built-in Speech Synthesis API for text-to-speech.

@@ -38,7 +38,7 @@ export function loadConfig(env = process.env, root = process.cwd()) {
     dataDir,
     rendersRoot: path.join(dataDir, "renders"),
     databasePath: path.join(dataDir, "velo.sqlite"),
-    motionForgeExecutable: env.MOTIONFORGE_EXECUTABLE || path.resolve(root, "..", "MotionForge", "dist", "prompt-animator", "prompt-animator.exe"),
+    motionForgeExecutable: env.MOTIONFORGE_EXECUTABLE || path.join(root, "vendor", "prompt-animator.exe"),
     motionForgeProvider,
     motionForgeModel: env.MOTIONFORGE_MODEL || "gpt-oss:120b-cloud",
     motionForgeStartupMs: positiveInteger(env.MOTIONFORGE_STARTUP_MS, 10000, "MOTIONFORGE_STARTUP_MS", 60000),
