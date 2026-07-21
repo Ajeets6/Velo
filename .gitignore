@@ -2,6 +2,7 @@ node_modules/
 .npm-cache/
 dist/
 .vite/
+.velo-preview/
 .env*
 artifacts/*
 renders/

@@ -1,20 +1,28 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import {
-  ArrowLeft,
   ArrowRight,
+  ArrowDown,
+  ArrowUp,
   Atom,
   CheckCircle,
+  CaretDown,
   Compass,
   FilmSlate,
   GearSix,
   Lightbulb,
   Moon,
+  Microphone,
   PaperPlaneTilt,
-  Pause,
+  NotePencil,
+  Plus,
+  SidebarSimple,
   SpeakerHigh,
   Sparkle,
   SpinnerGap,
   Sun,
+  Trash,
   WarningCircle,
   Waveform,
 } from "@phosphor-icons/react";
@@ -31,6 +39,47 @@ const starters = [
   "Explain projectile motion simply",
   "Guide me through conservation of energy",
 ];
+// Keep the browser implementation as a fallback while Piper is introduced.
+const BROWSER_TTS_ENABLED = true;
+
+const superscriptCharacters = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", n: "ⁿ", i: "ⁱ" };
+const subscriptCharacters = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
+const mathSymbols = { alpha: "α", beta: "β", gamma: "γ", delta: "δ", theta: "θ", lambda: "λ", mu: "μ", pi: "π", rho: "ρ", sigma: "σ", phi: "φ", omega: "ω", Delta: "Δ", Gamma: "Γ", Sigma: "Σ", Omega: "Ω", times: "×", cdot: "·", pm: "±", sqrt: "√", partial: "∂", nabla: "∇", infty: "∞", approx: "≈", neq: "≠", leq: "≤", geq: "≥" };
+
+function formatEquation(latex = "") {
+  let result = latex.replace(/\\vec\s*(?:\{\s*([^{}]+)\s*\}|([A-Za-z]))/g, (_, grouped, single) => `${grouped || single}⃗`);
+  let previous;
+  do {
+    previous = result;
+    result = result.replace(/\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1)/($2)");
+  } while (result !== previous);
+  result = result.replace(/\\([A-Za-z]+)/g, (_, command) => mathSymbols[command] || command);
+  result = result.replace(/\^\s*(?:\{([^{}]+)\}|([^\s]))/g, (_, grouped, single) => [...(grouped || single)].map((character) => superscriptCharacters[character] || character).join(""));
+  return result.replace(/_\s*(?:\{([^{}]+)\}|([^\s]))/g, (_, grouped, single) => [...(grouped || single)].map((character) => subscriptCharacters[character] || character).join(""));
+}
+
+function renderEquation(latex = "") {
+  return { __html: katex.renderToString(latex, { displayMode: true, throwOnError: false, strict: "ignore", trust: false }) };
+}
+
+const defaultProviderSettings = {
+  base: { provider: "local", model: "" },
+  interactive: { provider: "", model: "" },
+  visualize: { provider: "", model: "" },
+};
+
+function savedProviderSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("velo-provider-settings") || "{}");
+    return {
+      base: { ...defaultProviderSettings.base, ...saved.base },
+      interactive: { ...defaultProviderSettings.interactive, ...saved.interactive },
+      visualize: { ...defaultProviderSettings.visualize, ...saved.visualize },
+    };
+  } catch {
+    return defaultProviderSettings;
+  }
+}
 
 function ThemeToggle({ theme, onToggle }) {
   const isDark = theme === "dark";
@@ -43,6 +92,24 @@ function ThemeToggle({ theme, onToggle }) {
       {isDark ? <Sun weight="fill" /> : <Moon weight="fill" />}
     </button>
   );
+}
+
+function ProviderSelect({ value, options, onChange }) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find((option) => option.id === value);
+  return <div className="provider-select"><button type="button" className="provider-select-trigger" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>{selected?.label || "Not configured"}<CaretDown weight="bold" /></button>{open && <div className="provider-select-menu" role="listbox"><button type="button" role="option" aria-selected={!value} onClick={() => { onChange(""); setOpen(false); }}>Not configured</button>{options.map((option) => <button key={option.id} type="button" role="option" aria-selected={option.id === value} onClick={() => { onChange(option.id); setOpen(false); }}>{option.label}</button>)}</div>}</div>;
+}
+
+function TurnReview({ turn, onReturn }) {
+  const response = turn.response || {};
+  const sections = Array.isArray(response.sections) ? response.sections : [];
+  return <section className="turn-review" aria-live="polite"><div><span>Viewing earlier response</span><button type="button" onClick={onReturn}>Return to latest</button></div><p className="turn-review-prompt">{turn.prompt}</p>{response.title && <h2>{response.title}</h2>}{response.summary && <p>{response.summary}</p>}{sections.map((section, index) => <article key={`${section.kind}-${index}`}><strong>{section.kind}</strong><p>{section.text || section.latex}</p></article>)}{response.currentQuestion && <article><strong>Guide question</strong><p>{response.currentQuestion}</p>{response.message?.feedback && <p>{response.message.feedback}</p>}</article>}{!response.title && !response.currentQuestion && response.message?.feedback && <p>{response.message.feedback}</p>}</section>;
+}
+
+function WorkspaceDrawer({ open, onClose, groups, activeIds, onOpen, onNew, onDelete }) {
+  if (!open) return null;
+  const details = [{ kind: "tutor", title: "Chats", create: "New tutor chat" }];
+  return <div className="workspace-drawer-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><aside className="workspace-drawer" aria-label="Workspace history"><header><strong>Workspaces</strong><button type="button" onClick={onClose} aria-label="Close workspace history">&times;</button></header>{details.map(({ kind, title, create }) => <section key={kind}><div className="workspace-drawer-heading"><h2>{title}</h2><button type="button" onClick={() => onNew(kind)}>{create}</button></div>{groups[kind]?.length ? <ul>{groups[kind].map((thread) => <li key={thread.id}><button type="button" className={activeIds[kind] === thread.id ? "active" : ""} onClick={() => onOpen(thread)}><strong>{thread.title}</strong></button><button type="button" className="workspace-delete" onClick={() => onDelete(thread)} aria-label={`Delete ${thread.title}`}><Trash weight="bold" /></button></li>)}</ul> : <p>No saved {title.toLowerCase()} yet.</p>}</section>)}</aside></div>;
 }
 
 function Home({ onStart, theme, onToggleTheme }) {
@@ -232,8 +299,12 @@ function ExplainResponse({
   onSpeak,
   speechState,
   onVisualize,
+  ttsEnabled,
 }) {
   if (!explanation) return null;
+  const variantKey = learnerLevel === "current" ? "structured" : learnerLevel;
+  const activeVariant = explanation.variants?.[variantKey] || explanation;
+  const sections = activeVariant.sections || [];
   return (
     <section className="explain-response" aria-live="polite">
       <div className="explain-toolbar">
@@ -248,7 +319,7 @@ function ExplainResponse({
             onClick={() => setLearnerLevel("current")}
             className={learnerLevel === "current" ? "active" : ""}
           >
-            Current level
+            Structured
           </button>
           <button
             onClick={() => setLearnerLevel("technical")}
@@ -258,16 +329,17 @@ function ExplainResponse({
           </button>
         </div>
         <div className="speech-controls">
-          <button onClick={() => onSpeak("all")}>
+          <button disabled={!ttsEnabled} onClick={() => onSpeak("all", activeVariant.spokenText)}>
             {speechState.status === "speaking"
               ? "Pause"
               : speechState.status === "paused"
                 ? "Resume"
                 : "Listen"}
           </button>
-          <button onClick={() => onSpeak("restart")}>Restart</button>
+          <button disabled={!ttsEnabled} onClick={() => onSpeak("restart", activeVariant.spokenText)}>Restart</button>
           <select
             value={speechState.rate}
+            disabled={!ttsEnabled}
             onChange={(event) => onSpeak("rate", Number(event.target.value))}
             aria-label="Speech speed"
           >
@@ -278,11 +350,11 @@ function ExplainResponse({
         </div>
       </div>
       <h1>{explanation.title || "Building your explanation…"}</h1>
-      {explanation.summary && (
-        <p className="explain-summary">{explanation.summary}</p>
+      {activeVariant.summary && (
+        <p className="explain-summary">{activeVariant.summary}</p>
       )}
       <PhysicsDiagram type={explanation.visualSuggestion} />
-      {explanation.sections.map((section, index) => (
+      {sections.map((section, index) => (
         <article
           className={`explain-section ${section.kind}`}
           key={`${section.kind}-${index}`}
@@ -290,14 +362,13 @@ function ExplainResponse({
           <div>
             <span>{section.kind}</span>
             {section.kind === "equation" && (
-              <p className="equation" aria-label={section.spokenText}>
-                {section.latex}
-              </p>
+              <div className="equation" aria-label={section.spokenText} dangerouslySetInnerHTML={renderEquation(section.latex)} />
             )}
             {section.text && <p>{section.text}</p>}
           </div>
           <button
             className="section-listen"
+            disabled={!ttsEnabled}
             onClick={() =>
               onSpeak("section", section.spokenText || section.text)
             }
@@ -308,10 +379,10 @@ function ExplainResponse({
           </button>
         </article>
       ))}
-      {explanation.checkQuestion && (
+      {activeVariant.checkQuestion && (
         <div className="explain-check">
           <strong>Check your understanding</strong>
-          <p>{explanation.checkQuestion}</p>
+          <p>{activeVariant.checkQuestion}</p>
         </div>
       )}
       {explanation.visualSuggestion && (
@@ -379,7 +450,6 @@ function Tutor({ onBack, theme, onToggleTheme }) {
     () => sessionStorage.getItem("velo-explain-session") || "",
   );
   const [guideSession, setGuideSession] = useState(null);
-  const [backendOnline, setBackendOnline] = useState(false);
   const [animationJobs, setAnimationJobs] = useState([]);
   const [selectedAnimationId, setSelectedAnimationId] = useState(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -389,28 +459,102 @@ function Tutor({ onBack, theme, onToggleTheme }) {
   const [interactiveError, setInteractiveError] = useState("");
   const [interactiveExport, setInteractiveExport] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settings, setSettings] = useState(() =>
-    JSON.parse(
-      localStorage.getItem("velo-provider-settings") ||
-        '{"base":{"provider":"local","model":""},"interactive":{"provider":"","model":""},"visualize":{"provider":"","model":""}}',
-    ),
-  );
+  const [availableProviders, setAvailableProviders] = useState([]);
+  const [providerStatus, setProviderStatus] = useState({});
+  const [credentialStorage, setCredentialStorage] = useState({ available: true });
+  const [settings, setSettings] = useState(savedProviderSettings);
+  const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false);
+  const [workspaceGroups, setWorkspaceGroups] = useState({ tutor: [] });
+  const [activeWorkspaceIds, setActiveWorkspaceIds] = useState({ tutor: null });
+  const [tutorWorkspace, setTutorWorkspace] = useState(null);
+  const [tutorTurnIndex, setTutorTurnIndex] = useState(null);
+  const [tutorHistoryOpen, setTutorHistoryOpen] = useState(false);
   const inputRef = useRef(null);
   const dialogRef = useRef(null);
   const cardTriggerRef = useRef(null);
   const utteranceRef = useRef(null);
+  const voiceOrbCoreRef = useRef(null);
+  const voiceOrbPulseTimerRef = useRef(null);
   const [result, setResult] = useState({
     title: "Ask anything about physics",
     answer:
       "Choose how you want to learn, then send a question. Velo can explain the idea, guide you with one step at a time, or prepare a visual model.",
     nextStep: "Try one of the prompts below, or write your own.",
   });
-  const isVisualizationAvailable = (kind) =>
-    settings[kind]?.provider && settings[kind]?.model;
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    const maximumHeight = 168;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, maximumHeight)}px`;
+    input.style.overflowY = input.scrollHeight > maximumHeight ? "auto" : "hidden";
+  }, [prompt]);
+  const effectiveSelection = (kind) => {
+    const dedicated = settings[kind];
+    return dedicated?.provider && dedicated?.model ? dedicated : settings.base;
+  };
+  const isVisualizationAvailable = (kind) => {
+    const selection = effectiveSelection(kind);
+    return selection.provider === "ollama" && Boolean(selection.model);
+  };
+  const composerSelection = ["visualize", "interactive"].includes(mode)
+    ? effectiveSelection(mode)
+    : settings.base;
+  const composerProvider = availableProviders.find(
+    (provider) => provider.id === composerSelection.provider,
+  );
+  const composerModelLabel =
+    composerSelection.model || composerProvider?.label || "Velo local";
   const saveSettings = () => {
     localStorage.setItem("velo-provider-settings", JSON.stringify(settings));
     setSettingsOpen(false);
   };
+  useEffect(() => { fetch("/api/settings/providers").then((response) => response.json()).then((data) => setAvailableProviders(data.providers || [])).catch(() => setAvailableProviders([])); fetch("/api/settings/credentials").then((response) => response.json()).then((data) => setCredentialStorage(data.storage || { available: true })).catch(() => setCredentialStorage({ available: false, reason: "Secure credential storage could not be checked." })); void refreshWorkspaces().catch(() => {}); }, []);
+  async function testProvider(kind) { const selection = effectiveSelection(kind); setProviderStatus((current) => ({ ...current, [kind]: { pending: true } })); try { const response = await fetch("/api/settings/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(selection) }); const data = await response.json(); setProviderStatus((current) => ({ ...current, [kind]: response.ok ? { ...data, pending: false, tested: true } : { ok: false, pending: false, tested: true, message: data.error?.message || "Connection test failed." } })); } catch { setProviderStatus((current) => ({ ...current, [kind]: { ok: false, pending: false, tested: true, message: "Connection test could not be completed." } })); } }
+  async function saveApiKey(kind) { const input = document.getElementById(`${kind}-api-key`); const apiKey = input?.value || ""; const provider = settings[kind]?.provider; if (!apiKey || !["openai", "anthropic"].includes(provider)) return; const response = await fetch("/api/settings/credentials", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider, apiKey }) }); input.value = ""; setProviderStatus((current) => ({ ...current, [kind]: { saved: response.ok, pending: false, message: response.ok ? "API key saved securely. Test the connection to verify it." : "API key could not be saved." } })); }
+  async function refreshWorkspaces() {
+    const kinds = ["tutor"];
+    const entries = await Promise.all(kinds.map(async (kind) => {
+      const response = await fetch(`/api/workspaces?kind=${kind}`);
+      const data = await response.json();
+      return [kind, response.ok ? data.workspaces || [] : []];
+    }));
+    setWorkspaceGroups(Object.fromEntries(entries));
+  }
+  async function refreshTutorWorkspace(id, { selectLatest = true } = {}) {
+    if (!id) return;
+    const response = await fetch(`/api/workspaces/${id}`);
+    if (!response.ok) return;
+    const workspace = await response.json();
+    setTutorWorkspace(workspace);
+    setActiveWorkspaceIds((current) => ({ ...current, tutor: id }));
+    if (selectLatest) setTutorTurnIndex(Math.max(0, workspace.turns.length - 1));
+    void refreshWorkspaces();
+  }
+  async function openWorkspace(thread) {
+    const response = await fetch(`/api/workspaces/${thread.id}`);
+    if (!response.ok) return;
+    const workspace = await response.json();
+    const latest = workspace.turns.at(-1);
+    setActiveWorkspaceIds((current) => ({ ...current, tutor: workspace.id }));
+    setMode(latest?.mode === "guide" ? "guide" : "explain"); setTutorWorkspace(workspace); setTutorTurnIndex(Math.max(0, workspace.turns.length - 1));
+    if (latest?.mode === "guide" && latest.response) setGuideSession(latest.response);
+    if (latest?.mode === "explain" && latest.response) setExplanation(latest.response);
+    setWorkspaceDrawerOpen(false);
+  }
+  function newWorkspace() {
+    setActiveWorkspaceIds((current) => ({ ...current, tutor: null }));
+    setPrompt("");
+    setMode("explain"); setTutorWorkspace(null); setTutorTurnIndex(null); setExplanation(null); setGuideSession(null); setExplainSessionId(""); sessionStorage.removeItem("velo-explain-session");
+    setWorkspaceDrawerOpen(false);
+  }
+  async function deleteWorkspace(thread) {
+    if (!window.confirm("Delete this chat and all of its saved turns?")) return;
+    const response = await fetch(`/api/workspaces/${thread.id}`, { method: "DELETE" });
+    if (!response.ok) return;
+    if (activeWorkspaceIds.tutor === thread.id) newWorkspace();
+    await refreshWorkspaces();
+  }
 
   async function refreshAnimations() {
     try {
@@ -426,14 +570,12 @@ function Tutor({ onBack, theme, onToggleTheme }) {
   }
 
   useEffect(() => {
-    fetch("/api/health")
-      .then((response) => setBackendOnline(response.ok))
-      .catch(() => setBackendOnline(false));
     void refreshAnimations();
     const timer = window.setInterval(refreshAnimations, 1200);
     return () => {
       window.clearInterval(timer);
       window.speechSynthesis?.cancel();
+      window.clearTimeout(voiceOrbPulseTimerRef.current);
     };
   }, []);
   useEffect(() => {
@@ -500,7 +642,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
       const response = await fetch("/api/animations", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: question }),
+        body: JSON.stringify({ prompt: question, ...effectiveSelection("visualize") }),
       });
       const job = await response.json();
       if (!response.ok)
@@ -522,7 +664,11 @@ function Tutor({ onBack, theme, onToggleTheme }) {
       const response = await fetch("/api/visualizations", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: question, preferTemplate: true, ...settings.interactive }),
+        body: JSON.stringify({
+          prompt: question,
+          preferTemplate: true,
+          ...effectiveSelection("interactive"),
+        }),
       });
       const data = await response.json();
       if (!response.ok)
@@ -621,7 +767,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
     setPrompt(text);
     requestAnimationFrame(() => inputRef.current?.focus());
   }
-  async function streamExplain(question, level = learnerLevel) {
+  async function streamExplain(question) {
     setExplanation({
       title: "Building your explanation…",
       summary: "",
@@ -633,8 +779,9 @@ function Tutor({ onBack, theme, onToggleTheme }) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         prompt: question,
-        learnerLevel: level,
         sessionId: explainSessionId || undefined,
+        workspaceId: activeWorkspaceIds.tutor || undefined,
+        ...settings.base,
       }),
     });
     if (!response.ok || !response.body) {
@@ -646,6 +793,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let workspaceId = null;
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -660,6 +808,8 @@ function Tutor({ onBack, theme, onToggleTheme }) {
         if (event === "meta") {
           setExplainSessionId(payload.sessionId);
           sessionStorage.setItem("velo-explain-session", payload.sessionId);
+          workspaceId = payload.workspaceId || workspaceId;
+          if (workspaceId) setActiveWorkspaceIds((current) => ({ ...current, tutor: workspaceId }));
           setExplanation((current) => ({ ...current, ...payload }));
         }
         if (event === "section")
@@ -671,9 +821,10 @@ function Tutor({ onBack, theme, onToggleTheme }) {
           setExplanation((current) => ({ ...current, ...payload }));
       }
     }
+    if (workspaceId) await refreshTutorWorkspace(workspaceId);
   }
   function explainSpeech(action, text) {
-    if (!("speechSynthesis" in window)) return;
+    if (!BROWSER_TTS_ENABLED || !("speechSynthesis" in window)) return;
     if (action === "rate") {
       setSpeechState((state) => ({ ...state, rate: text }));
       return;
@@ -681,7 +832,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
     if (action === "restart") {
       window.speechSynthesis.cancel();
       setSpeechState((state) => ({ ...state, status: "idle" }));
-      if (explanation?.spokenText) setTimeout(() => explainSpeech("all"), 0);
+      if (text || explanation?.spokenText) setTimeout(() => explainSpeech("all", text), 0);
       return;
     }
     if (action === "all" && speechState.status === "speaking") {
@@ -712,7 +863,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
     const response = await fetch("/api/guide/sessions", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: question, learnerLevel }),
+      body: JSON.stringify({ prompt: question, learnerLevel, workspaceId: activeWorkspaceIds.tutor || undefined, ...settings.base }),
     });
     const session = await response.json();
     if (!response.ok)
@@ -720,9 +871,9 @@ function Tutor({ onBack, theme, onToggleTheme }) {
         session.error?.message || "Velo could not start this guide.",
       );
     setGuideSession(session);
-    setPrompt("");
+    if (session.workspaceId) await refreshTutorWorkspace(session.workspaceId);
   }
-  async function guideAction(action) {
+  async function guideAction(action, answerOverride = null) {
     if (!guideSession) return;
     try {
       const response = await fetch(
@@ -732,7 +883,8 @@ function Tutor({ onBack, theme, onToggleTheme }) {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             action,
-            answer: action === "answer" ? prompt.trim() : "",
+            answer: action === "answer" ? (answerOverride ?? prompt.trim()) : "",
+            workspaceId: activeWorkspaceIds.tutor || undefined,
           }),
         },
       );
@@ -742,6 +894,7 @@ function Tutor({ onBack, theme, onToggleTheme }) {
           session.error?.message || "The guide could not continue.",
         );
       setGuideSession(session);
+      if (activeWorkspaceIds.tutor) await refreshTutorWorkspace(activeWorkspaceIds.tutor);
       if (action === "visual") {
         setMode("visualize");
         setPrompt(session.message?.visualPrompt || guideSession.prompt);
@@ -759,21 +912,37 @@ function Tutor({ onBack, theme, onToggleTheme }) {
     await fetch(`/api/guide/sessions/${guideSession.id}`, { method: "DELETE" });
     setGuideSession(null);
   }
+  function resetVoiceOrb() {
+    window.clearTimeout(voiceOrbPulseTimerRef.current);
+    if (voiceOrbCoreRef.current) voiceOrbCoreRef.current.style.transform = "scale(1)";
+  }
+  function pulseVoiceOrb(word) {
+    const length = word.replace(/[^a-z0-9]/gi, "").length;
+    const scale = Math.min(1.3, 1.08 + length * 0.03);
+    window.clearTimeout(voiceOrbPulseTimerRef.current);
+    if (voiceOrbCoreRef.current) voiceOrbCoreRef.current.style.transform = `scale(${scale})`;
+    voiceOrbPulseTimerRef.current = window.setTimeout(resetVoiceOrb, 500);
+  }
   function speak() {
-    if (!("speechSynthesis" in window) || loading) return;
+    if (!BROWSER_TTS_ENABLED || !("speechSynthesis" in window) || loading) return;
     if (speaking) {
       window.speechSynthesis.cancel();
+      resetVoiceOrb();
       setSpeaking(false);
       return;
     }
-    const speech = new SpeechSynthesisUtterance(
-      `${result.title}. ${result.answer}. ${result.nextStep || ""}`,
-    );
+    const spokenResponse = `${result.title}. ${result.answer}. ${result.nextStep || ""}`;
+    const speech = new SpeechSynthesisUtterance(spokenResponse);
     speech.rate = 0.94;
     speech.pitch = 1;
     speech.onstart = () => setSpeaking(true);
-    speech.onend = () => setSpeaking(false);
-    speech.onerror = () => setSpeaking(false);
+    speech.onboundary = (event) => {
+      if (event.name !== "word") return;
+      pulseVoiceOrb(spokenResponse.slice(event.charIndex, event.charIndex + event.charLength));
+    };
+    speech.onend = () => { resetVoiceOrb(); setSpeaking(false); };
+    speech.onerror = () => { resetVoiceOrb(); setSpeaking(false); };
+    utteranceRef.current = speech;
     window.speechSynthesis.speak(speech);
   }
   async function submit(event) {
@@ -783,23 +952,22 @@ function Tutor({ onBack, theme, onToggleTheme }) {
     window.speechSynthesis?.cancel();
     setSpeaking(false);
     setLoading(true);
-    if (mode === "visualize") void generateAnimation(question);
-    if (mode === "interactive") void generateInteractive(question);
+    setPrompt("");
     try {
       if (mode === "explain") {
         await streamExplain(question);
-        setBackendOnline(true);
       } else if (mode === "guide") {
-        if (guideSession) await guideAction("answer");
+        if (guideSession) await guideAction("answer", question);
         else await startGuide(question);
-        setBackendOnline(true);
+      } else if (mode === "visualize") {
+        await generateAnimation(question);
       } else if (mode === "interactive") {
-        setBackendOnline(true);
+        await generateInteractive(question);
       } else {
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ prompt: question, mode }),
+          body: JSON.stringify({ prompt: question, mode, ...settings.base }),
         });
         const data = await response.json();
         if (!response.ok)
@@ -809,7 +977,6 @@ function Tutor({ onBack, theme, onToggleTheme }) {
               "Velo could not answer that yet.",
           );
         setResult(data);
-        setBackendOnline(true);
       }
     } catch (error) {
       setResult({
@@ -817,7 +984,6 @@ function Tutor({ onBack, theme, onToggleTheme }) {
         answer: error.message,
         nextStep: "Make sure the local backend is running, then try again.",
       });
-      setBackendOnline(false);
     } finally {
       setLoading(false);
     }
@@ -825,6 +991,10 @@ function Tutor({ onBack, theme, onToggleTheme }) {
 
   const latestAnimation = animationJobs[0] || null;
   const historyJobs = animationJobs.slice(1);
+  const tutorTurns = tutorWorkspace?.turns || [];
+  const latestTutorTurnIndex = Math.max(0, tutorTurns.length - 1);
+  const selectedTutorTurn = tutorTurns[tutorTurnIndex ?? latestTutorTurnIndex] || null;
+  const viewingEarlierTutorTurn = selectedTutorTurn && (tutorTurnIndex ?? latestTutorTurnIndex) !== latestTutorTurnIndex;
   const displayTime = (value) =>
     value
       ? new Intl.DateTimeFormat(undefined, {
@@ -836,16 +1006,18 @@ function Tutor({ onBack, theme, onToggleTheme }) {
   return (
     <main className="tutor-screen">
       <header className="tutor-header">
-        <button
-          className="icon-button"
-          onClick={onBack}
-          aria-label="Back to welcome"
-        >
-          <ArrowLeft weight="bold" />
-        </button>
+        <div className="header-start">
+          <button className="settings-button" onClick={() => setWorkspaceDrawerOpen(true)} aria-label="Open workspace history">
+            <SidebarSimple weight="bold" />
+          </button>
+          <button className="new-workspace-button" onClick={newWorkspace} aria-label="New tutor chat" title="New tutor chat">
+            <NotePencil weight="bold" />
+          </button>
+        </div>
         <a
           className="brand compact"
           href="#"
+          aria-label="Back to Velo home"
           onClick={(event) => {
             event.preventDefault();
             onBack();
@@ -857,14 +1029,14 @@ function Tutor({ onBack, theme, onToggleTheme }) {
           <span>Velo</span>
         </a>
         <div className="header-actions">
-          <button className="settings-button" onClick={() => setSettingsOpen(true)} aria-label="Provider settings"><GearSix weight="bold" /></button>
-          <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-          <div
-            className={`backend-state ${backendOnline ? "online" : "offline"}`}
+          <button
+            className="settings-button"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Provider settings"
           >
-            <span />
-            {backendOnline ? "Local backend" : "Reconnecting"}
-          </div>
+            <GearSix weight="bold" />
+          </button>
+          <ThemeToggle theme={theme} onToggle={onToggleTheme} />
         </div>
       </header>
       <div className="tutor-body">
@@ -877,8 +1049,16 @@ function Tutor({ onBack, theme, onToggleTheme }) {
                 className={mode === id ? "active" : ""}
                 onClick={() => setMode(id)}
                 aria-pressed={mode === id}
-                disabled={["visualize", "interactive"].includes(id) && !isVisualizationAvailable(id)}
-                title={["visualize", "interactive"].includes(id) && !isVisualizationAvailable(id) ? "Configure a provider and model in Settings to enable this mode." : undefined}
+                disabled={
+                  ["visualize", "interactive"].includes(id) &&
+                  !isVisualizationAvailable(id)
+                }
+                title={
+                  ["visualize", "interactive"].includes(id) &&
+                  !isVisualizationAvailable(id)
+                    ? "Configure a provider and model in Settings to enable this mode."
+                    : undefined
+                }
               >
                 <Icon weight={mode === id ? "fill" : "regular"} />
                 {label}
@@ -888,13 +1068,22 @@ function Tutor({ onBack, theme, onToggleTheme }) {
         </section>
         <section className="voice-section">
           <button
-            className={`voice-button ${speaking ? "speaking" : ""}`}
+            className={`voice-button voice-orb ${speaking ? "is-speaking" : ""}`}
             onClick={speak}
-            aria-label={speaking ? "Stop speaking" : "Read response aloud"}
+            disabled={!BROWSER_TTS_ENABLED}
+            aria-label={BROWSER_TTS_ENABLED ? (speaking ? "Stop speaking" : "Read response aloud") : "Local voice is coming soon"}
+            aria-pressed={speaking}
           >
-            {speaking ? <Pause weight="fill" /> : <SpeakerHigh weight="fill" />}
+            <span className="voice-orb__ring voice-orb__ring--one" aria-hidden="true" />
+            <span className="voice-orb__ring voice-orb__ring--two" aria-hidden="true" />
+            <span className="voice-orb__glow" aria-hidden="true" />
+            <span className="voice-orb__core" ref={voiceOrbCoreRef} aria-hidden="true">
+              <span className="voice-orb__liquid voice-orb__liquid--one" />
+              <span className="voice-orb__liquid voice-orb__liquid--two" />
+              <span className="voice-orb__highlight" />
+            </span>
           </button>
-          <span>{speaking ? "Speaking" : "Listen"}</span>
+          <span>{speaking ? "Speaking — tap to stop" : "Listen"}</span>
         </section>
         <section
           className={`output-card ${loading ? "loading" : ""}`}
@@ -931,22 +1120,23 @@ function Tutor({ onBack, theme, onToggleTheme }) {
           )}
         </section>
 
-        {mode === "explain" && explanation && (
+        {viewingEarlierTutorTurn && selectedTutorTurn && (
+          <TurnReview turn={selectedTutorTurn} onReturn={() => { window.speechSynthesis?.cancel(); setTutorTurnIndex(latestTutorTurnIndex); }} />
+        )}
+        {mode === "explain" && explanation && !viewingEarlierTutorTurn && (
           <ExplainResponse
             explanation={explanation}
             learnerLevel={learnerLevel}
-            setLearnerLevel={(level) => {
-              setLearnerLevel(level);
-              if (prompt.trim()) void streamExplain(prompt.trim(), level);
-            }}
+            setLearnerLevel={setLearnerLevel}
             onSpeak={explainSpeech}
             speechState={speechState}
+            ttsEnabled={BROWSER_TTS_ENABLED}
             onVisualize={() => {
               setMode("visualize");
             }}
           />
         )}
-        {mode === "guide" && guideSession && (
+        {mode === "guide" && guideSession && !viewingEarlierTutorTurn && (
           <GuidePanel
             session={guideSession}
             onAction={guideAction}
@@ -1050,11 +1240,24 @@ function Tutor({ onBack, theme, onToggleTheme }) {
             </button>
           ))}
         </div>
+        {["explain", "guide"].includes(mode) && selectedTutorTurn && (
+          <section className="active-turn-card" aria-label="Current tutor prompt">
+            <button type="button" className="active-turn-copy" onClick={() => setTutorHistoryOpen(true)}>
+              <span>You asked · {(tutorTurnIndex ?? latestTutorTurnIndex) + 1} of {tutorTurns.length}</span>
+              <strong>{selectedTutorTurn.prompt}</strong>
+            </button>
+            <div className="active-turn-navigation">
+              <button type="button" disabled={(tutorTurnIndex ?? latestTutorTurnIndex) === 0} onClick={() => { window.speechSynthesis?.cancel(); setTutorTurnIndex((index) => Math.max(0, (index ?? latestTutorTurnIndex) - 1)); }} aria-label="Previous prompt"><ArrowUp weight="bold" /></button>
+              <button type="button" disabled={(tutorTurnIndex ?? latestTutorTurnIndex) >= latestTutorTurnIndex} onClick={() => { window.speechSynthesis?.cancel(); setTutorTurnIndex((index) => Math.min(latestTutorTurnIndex, (index ?? latestTutorTurnIndex) + 1)); }} aria-label="Next prompt"><ArrowDown weight="bold" /></button>
+            </div>
+          </section>
+        )}
         <form className="prompt-form" onSubmit={submit}>
           <label htmlFor="physics-prompt">Ask Velo</label>
           <div className="prompt-field">
             <textarea
               id="physics-prompt"
+              aria-label="Ask Velo"
               ref={inputRef}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
@@ -1067,18 +1270,105 @@ function Tutor({ onBack, theme, onToggleTheme }) {
               placeholder="Ask a physics question…"
               rows="1"
             />
-            <button
-              type="submit"
-              disabled={!prompt.trim() || loading}
-              aria-label="Send question"
-            >
-              <PaperPlaneTilt weight="fill" />
-            </button>
+            <div className="composer-toolbar">
+              <span
+                className="composer-disabled-control"
+                data-tooltip="Attachments are coming in the next version"
+              >
+                <button type="button" disabled aria-label="Attachments coming soon">
+                  <Plus weight="bold" />
+                </button>
+              </span>
+              <span className="composer-model" title={composerModelLabel}>
+                {composerModelLabel}
+              </span>
+              <span
+                className="composer-disabled-control"
+                data-tooltip="Voice input is coming in the next version"
+              >
+                <button type="button" disabled aria-label="Voice input coming soon">
+                  <Microphone weight="bold" />
+                </button>
+              </span>
+              <button
+                className="prompt-send"
+                type="submit"
+                disabled={!prompt.trim() || loading}
+                aria-label="Send question"
+              >
+                <PaperPlaneTilt weight="fill" />
+              </button>
+            </div>
           </div>
           <span>Press Enter to send · Shift + Enter for a new line</span>
         </form>
       </div>
-      {settingsOpen && <div className="visualization-overlay"><section className="visualization-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button className="dialog-close" onClick={() => setSettingsOpen(false)} aria-label="Close settings">×</button><p className="dialog-kicker">Providers</p><h2 id="settings-title">Settings</h2>{["base", "interactive", "visualize"].map((kind) => <fieldset key={kind}><legend>{kind === "base" ? "Base mode — Explain and Guide" : `${kind[0].toUpperCase()}${kind.slice(1)} mode`}</legend><select value={settings[kind].provider} onChange={(event) => setSettings((current) => ({ ...current, [kind]: { ...current[kind], provider: event.target.value } }))}><option value="">Not configured</option>{kind === "base" && <option value="local">Local</option>}<option value="ollama">Ollama</option><option value="anthropic">Anthropic</option></select><input value={settings[kind].model} placeholder="Model name" onChange={(event) => setSettings((current) => ({ ...current, [kind]: { ...current[kind], model: event.target.value } }))} /></fieldset>)}<button className="settings-save" onClick={saveSettings}>Save settings</button></section></div>}
+      <WorkspaceDrawer
+        open={workspaceDrawerOpen}
+        onClose={() => setWorkspaceDrawerOpen(false)}
+        groups={workspaceGroups}
+        activeIds={activeWorkspaceIds}
+        onOpen={openWorkspace}
+        onNew={newWorkspace}
+        onDelete={deleteWorkspace}
+      />
+      {tutorHistoryOpen && (
+        <div className="turn-history-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setTutorHistoryOpen(false); }}>
+          <section className="turn-history-dialog" role="dialog" aria-modal="true" aria-labelledby="turn-history-title">
+            <button className="dialog-close" type="button" onClick={() => setTutorHistoryOpen(false)} aria-label="Close chat history">&times;</button>
+            <p className="dialog-kicker">This chat</p>
+            <h2 id="turn-history-title">Previous prompts</h2>
+            <ol>
+              {tutorTurns.map((turn, index) => <li key={turn.id}><button type="button" className={index === (tutorTurnIndex ?? latestTutorTurnIndex) ? "active" : ""} onClick={() => { window.speechSynthesis?.cancel(); setTutorTurnIndex(index); setTutorHistoryOpen(false); }}><span>{index + 1}</span><strong>{turn.prompt}</strong><small>{turn.mode === "guide" ? "Guide" : "Explain"}</small></button></li>)}
+            </ol>
+          </section>
+        </div>
+      )}
+      {settingsOpen && (
+        <div className="visualization-overlay">
+          <section
+            className="visualization-dialog settings-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-title"
+          >
+            <button
+              className="dialog-close"
+              onClick={() => setSettingsOpen(false)}
+              aria-label="Close settings"
+            >
+              ×
+            </button>
+            <p className="dialog-kicker">Providers</p>
+            <h2 id="settings-title">Settings</h2>
+            {["base", "interactive", "visualize"].map((kind) => (
+              <fieldset key={kind}>
+                <legend>
+                  {kind === "base"
+                    ? "Base mode — Explain and Guide"
+                    : `${kind[0].toUpperCase()}${kind.slice(1)} mode`}
+                </legend>
+                <ProviderSelect value={settings[kind].provider} options={availableProviders.filter((provider) => kind === "base" ? provider.supportsBaseTutor : provider.supportsMotionForge)} onChange={(provider) => setSettings((current) => ({ ...current, [kind]: { provider, model: "" } }))} />
+                <input
+                  value={settings[kind].model}
+                  placeholder="Model name"
+                  onChange={(event) =>
+                    setSettings((current) => ({
+                      ...current,
+                      [kind]: { ...current[kind], model: event.target.value },
+                    }))
+                  }
+                />
+                {["openai", "anthropic"].includes(settings[kind].provider) && (credentialStorage.available ? <><input id={`${kind}-api-key`} type="password" autoComplete="off" placeholder="API key (stored securely)" /><button type="button" onClick={() => saveApiKey(kind)}>Save API key</button></> : <p className="settings-status error"><i />{credentialStorage.reason || "Secure credential storage is unavailable."}</p>)}
+                <div className="settings-test-row"><button type="button" onClick={() => testProvider(kind)} disabled={providerStatus[kind]?.pending || !effectiveSelection(kind).provider}>{providerStatus[kind]?.pending ? "Testing…" : "Test connection"}</button>{providerStatus[kind]?.message && <p className={providerStatus[kind].saved ? "settings-status saved" : providerStatus[kind].ok ? "settings-status ok" : "settings-status error"}><i />{providerStatus[kind].saved ? "API key saved" : providerStatus[kind].ok ? "Connected" : "Unable to connect"}</p>}</div>
+              </fieldset>
+            ))}
+            <button className="settings-save" onClick={saveSettings}>
+              Save settings
+            </button>
+          </section>
+        </div>
+      )}
       {historyOpen && (
         <div
           className="visualization-overlay"

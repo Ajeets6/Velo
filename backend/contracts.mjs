@@ -46,6 +46,20 @@ export function validateExplainResponse(value) {
     if (!isString(section?.text) && !isString(section?.latex)) issues.push(issue(`sections[${index}]`, "must have text or latex"));
     if (section?.spokenText !== undefined && !isString(section.spokenText)) issues.push(issue(`sections[${index}].spokenText`, "must be a string"));
   });
+  if (!isRecord(value.variants)) issues.push(issue("variants", "must contain simpler, structured, and technical variants"));
+  else ["simpler", "structured", "technical"].forEach((level) => {
+    const variant = value.variants[level];
+    if (!isRecord(variant)) return issues.push(issue(`variants.${level}`, "must be an object"));
+    if (!isString(variant.summary, { min: 1 })) issues.push(issue(`variants.${level}.summary`, "must be a non-empty string"));
+    if (!Array.isArray(variant.sections) || variant.sections.length === 0) issues.push(issue(`variants.${level}.sections`, "must contain at least one section"));
+    else variant.sections.forEach((section, index) => {
+      if (!isRecord(section) || !isString(section.kind, { min: 1 })) issues.push(issue(`variants.${level}.sections[${index}]`, "must have a kind"));
+      if (!isString(section?.text) && !isString(section?.latex)) issues.push(issue(`variants.${level}.sections[${index}]`, "must have text or latex"));
+      if (section?.spokenText !== undefined && !isString(section.spokenText)) issues.push(issue(`variants.${level}.sections[${index}].spokenText`, "must be a string"));
+    });
+    if (variant.checkQuestion !== undefined && !isString(variant.checkQuestion, { min: 1 })) issues.push(issue(`variants.${level}.checkQuestion`, "must be a non-empty string when provided"));
+    if (variant.spokenText !== undefined && !isString(variant.spokenText, { min: 1 })) issues.push(issue(`variants.${level}.spokenText`, "must be a non-empty string when provided"));
+  });
   if (value.visualSuggestion !== null && value.visualSuggestion !== undefined && !isString(value.visualSuggestion)) issues.push(issue("visualSuggestion", "must be a string or null"));
   return result(value, issues);
 }

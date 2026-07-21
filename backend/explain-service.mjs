@@ -9,6 +9,67 @@ const concepts = [
   { words: ["energy", "kinetic", "potential"], title: "Energy changes form", topic: "energy", visualSuggestion: "graph", intuition: "Energy is a useful accounting system: it can move between forms while the total stays constant in an isolated system.", equation: "Eₖ = ½mv²", spokenEquation: "kinetic energy equals one half mass times speed squared", definition: "Kinetic energy is motion energy, measured in joules. Mass is in kilograms and speed is in metres per second.", example: "As a dropped ball speeds up, gravitational potential energy becomes kinetic energy." },
 ];
 
+const explainSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["contractVersion", "mode", "title", "summary", "sections", "checkQuestion", "spokenText", "variants"],
+  properties: {
+    contractVersion: { const: CONTRACT_VERSION },
+    mode: { const: "explain" },
+    title: { type: "string", minLength: 1 },
+    summary: { type: "string", minLength: 1 },
+    sections: { type: "array", minItems: 1, items: { $ref: "#/$defs/section" } },
+    checkQuestion: { type: "string", minLength: 1 },
+    spokenText: { type: "string", minLength: 1 },
+    visualSuggestion: { type: ["string", "null"] },
+    variants: {
+      type: "object",
+      additionalProperties: false,
+      required: ["simpler", "structured", "technical"],
+      properties: {
+        simpler: { $ref: "#/$defs/variant" },
+        structured: { $ref: "#/$defs/variant" },
+        technical: { $ref: "#/$defs/variant" },
+      },
+    },
+  },
+  $defs: {
+    section: {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind"],
+      properties: {
+        kind: { type: "string", minLength: 1 },
+        text: { type: "string", minLength: 1 },
+        latex: { type: "string", minLength: 1 },
+        spokenText: { type: "string", minLength: 1 },
+      },
+      anyOf: [{ required: ["text"] }, { required: ["latex"] }],
+    },
+    variant: {
+      type: "object",
+      additionalProperties: false,
+      required: ["summary", "sections", "spokenText"],
+      properties: {
+        summary: { type: "string", minLength: 1 },
+        sections: { type: "array", minItems: 1, items: { $ref: "#/$defs/section" } },
+        checkQuestion: { type: "string", minLength: 1 },
+        spokenText: { type: "string", minLength: 1 },
+      },
+    },
+  },
+};
+
+const explainVariantSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["contractVersion", "mode", "title", "summary", "sections", "spokenText"],
+  properties: {
+    contractVersion: { const: CONTRACT_VERSION }, mode: { const: "explain" }, title: { type: "string", minLength: 1 }, summary: { type: "string", minLength: 1 }, sections: { type: "array", minItems: 1, items: { $ref: "#/$defs/section" } }, checkQuestion: { type: "string", minLength: 1 }, spokenText: { type: "string", minLength: 1 }, visualSuggestion: { type: ["string", "null"] },
+  },
+  $defs: explainSchema.$defs,
+};
+
 function chooseConcept(prompt) { const normal = prompt.toLowerCase(); return concepts.find((item) => item.words.some((word) => normal.includes(word))) || { title: "Let’s build a physics model", topic: "physics modelling", visualSuggestion: null, intuition: "Start by defining the system, what changes, and the quantity you want to find.", equation: "known values → principle → result", spokenEquation: "known values, then a physics principle, then a checked result", definition: "A useful model states assumptions and checks units and direction.", example: "For a moving object, list forces first, then decide which equation connects them to the unknown." }; }
 
 function localExplain(prompt, learnerLevel, context) {
@@ -22,6 +83,34 @@ function localExplain(prompt, learnerLevel, context) {
     { kind: "recap", text: `The key idea is ${concept.topic}. ${context.topic && context.topic !== concept.topic ? `This connects to your earlier topic, ${context.topic}.` : ""}`, spokenText: `The key idea is ${concept.topic}.` },
   ];
   return { contractVersion: CONTRACT_VERSION, mode: "explain", title: concept.title, summary: concept.intuition, sections, checkQuestion: "Which part would you like to check next: the intuition, the equation, or the example?", visualSuggestion: concept.visualSuggestion, spokenText: sections.map((section) => section.spokenText).join(" "), topic: concept.topic };
+}
+
+function localExplainVariants(prompt, context) {
+  const concept = chooseConcept(prompt);
+  const structuredSections = [
+    { kind: "intuition", text: concept.intuition, spokenText: concept.intuition },
+    { kind: "detail", text: "Connect the intuition to the governing physics principle, then test it with a concrete example.", spokenText: "Connect the intuition to the governing physics principle, then test it with a concrete example." },
+    { kind: "equation", latex: concept.equation, text: concept.definition, spokenText: concept.spokenEquation },
+    { kind: "example", text: concept.example, spokenText: concept.example },
+    { kind: "recap", text: `The key idea is ${concept.topic}. ${context.topic && context.topic !== concept.topic ? `This connects to your earlier topic, ${context.topic}.` : ""}`, spokenText: `The key idea is ${concept.topic}.` },
+  ];
+  const simplerSections = [
+    { kind: "intuition", text: concept.intuition, spokenText: concept.intuition },
+    { kind: "example", text: concept.example, spokenText: concept.example },
+  ];
+  const technicalSections = [
+    { kind: "definition", text: concept.definition, spokenText: concept.definition },
+    { kind: "assumptions", text: "Define the system, use consistent SI units, and verify that the model assumptions match the situation before applying the equation.", spokenText: "Define the system, use consistent SI units, and verify that the model assumptions match the situation before applying the equation." },
+    { kind: "equation", latex: concept.equation, text: concept.definition, spokenText: concept.spokenEquation },
+    { kind: "example", text: concept.example, spokenText: concept.example },
+  ];
+  const variant = (summary, sections, checkQuestion) => ({ summary, sections, ...(checkQuestion ? { checkQuestion } : {}), spokenText: sections.map((section) => section.spokenText || section.text || section.latex).join(" ") });
+  const variants = {
+    simpler: variant(concept.intuition, simplerSections),
+    structured: variant(concept.intuition, structuredSections, "Which part would you like to check next: the intuition, the equation, or the example?"),
+    technical: variant(concept.definition, technicalSections),
+  };
+  return { contractVersion: CONTRACT_VERSION, mode: "explain", title: concept.title, summary: variants.structured.summary, sections: structuredSections, checkQuestion: variants.structured.checkQuestion, visualSuggestion: concept.visualSuggestion, spokenText: variants.structured.spokenText, variants, topic: concept.topic };
 }
 
 export class ExplainService {
@@ -42,14 +131,30 @@ export class ExplainService {
     const prompts = [...context.recentPrompts, prompt].slice(-6);
     this.db.prepare("INSERT INTO explain_sessions(id, learner_level, topic, terminology, recent_prompts, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET learner_level=excluded.learner_level, topic=excluded.topic, terminology=excluded.terminology, recent_prompts=excluded.recent_prompts, updated_at=excluded.updated_at").run(id, learnerLevel, response.topic, JSON.stringify(terms), JSON.stringify(prompts), new Date().toISOString());
   }
-  async create({ prompt, sessionId, learnerLevel }) {
+  async create({ prompt, sessionId, learnerLevel }, { provider = this.provider } = {}) {
     const id = sessionId || randomUUID(); const context = this.context(id);
-    let response = localExplain(prompt, learnerLevel, context);
-    if (this.provider?.name === "ollama") {
-      try {
-        const candidate = await this.provider.generateStructured({ prompt: `Learner level: ${learnerLevel}. Prior topic: ${context.topic || "none"}. ${prompt}`, mode: "explain", schema: { type: "object", required: ["contractVersion", "mode", "title", "summary", "sections", "checkQuestion", "spokenText"] } });
-        if (validateExplainResponse(candidate).ok) response = { ...candidate, topic: chooseConcept(prompt).topic };
-      } catch { this.log("warn", "explain_fallback", { sessionId: id }); }
+    let response = localExplainVariants(prompt, context);
+    if (provider?.name !== "local" && provider?.generateStructured) {
+      const instructions = {
+        simpler: "Write a simple, plain-language explanation. Use only relevant intuition and at most one everyday example. Avoid equations unless essential.",
+        structured: "Write a guided explanation. Use only relevant intuition, detail, equation, example, assumptions, recap, and checkQuestion sections.",
+        technical: "Write an in-depth explanation. Use only relevant definition, assumptions, equation, derivation, units, limitations, and example sections with precise terminology.",
+      };
+      const valid = (candidate) => candidate?.contractVersion === CONTRACT_VERSION && candidate?.mode === "explain" && typeof candidate.title === "string" && typeof candidate.summary === "string" && typeof candidate.spokenText === "string" && Array.isArray(candidate.sections) && candidate.sections.length > 0 && candidate.sections.every((section) => typeof section?.kind === "string" && (typeof section.text === "string" || typeof section.latex === "string"));
+      const candidates = await Promise.all(Object.entries(instructions).map(async ([level, instruction]) => {
+        try {
+          return [level, await provider.generateStructured({ prompt: `${instruction}\n\nQuestion: ${prompt}\nPrior topic: ${context.topic || "none"}. Return only this one explanation. Omit any field or tagged section that is not useful; never send empty strings or placeholders.`, mode: "explain", schema: explainVariantSchema })];
+        } catch {
+          this.log("warn", "explain_variant_fallback", { sessionId: id, level });
+          return [level, null];
+        }
+      }));
+      const modelVariants = Object.fromEntries(candidates);
+      const fallback = response;
+      const asVariant = (level) => valid(modelVariants[level]) ? { summary: modelVariants[level].summary, sections: modelVariants[level].sections, ...(modelVariants[level].checkQuestion ? { checkQuestion: modelVariants[level].checkQuestion } : {}), spokenText: modelVariants[level].spokenText } : fallback.variants[level];
+      const structured = valid(modelVariants.structured) ? modelVariants.structured : null;
+      const merged = { contractVersion: CONTRACT_VERSION, mode: "explain", title: structured?.title || fallback.title, summary: structured?.summary || fallback.summary, sections: structured?.sections || fallback.sections, checkQuestion: structured?.checkQuestion || fallback.checkQuestion, spokenText: structured?.spokenText || fallback.spokenText, visualSuggestion: structured?.visualSuggestion ?? fallback.visualSuggestion, variants: { simpler: asVariant("simpler"), structured: asVariant("structured"), technical: asVariant("technical") }, topic: chooseConcept(prompt).topic };
+      if (validateExplainResponse(merged).ok) response = merged;
     }
     this.save(id, learnerLevel, response, prompt, context);
     return { sessionId: id, response };

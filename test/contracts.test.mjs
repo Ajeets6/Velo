@@ -11,7 +11,8 @@ test("chat request trims valid input and rejects invalid modes", () => {
 
 test("all Phase 0 versioned contracts accept valid representative values", () => {
   const base = { contractVersion: CONTRACT_VERSION };
-  assert.equal(validateExplainResponse({ ...base, mode: "explain", title: "Gravity", summary: "A pull", sections: [{ kind: "intuition", text: "Masses attract." }, { kind: "equation", latex: "F = ma", spokenText: "force equals mass times acceleration" }], checkQuestion: "What changes?", visualSuggestion: null, spokenText: "Masses attract." }).ok, true);
+  const sections = [{ kind: "intuition", text: "Masses attract." }, { kind: "equation", latex: "F = ma", spokenText: "force equals mass times acceleration" }];
+  assert.equal(validateExplainResponse({ ...base, mode: "explain", title: "Gravity", summary: "A pull", sections, checkQuestion: "What changes?", visualSuggestion: null, spokenText: "Masses attract.", variants: { simpler: { summary: "A pull", sections: [sections[0]], spokenText: "Masses attract." }, structured: { summary: "A pull", sections, checkQuestion: "What changes?", spokenText: "Masses attract." }, technical: { summary: "A pull", sections, spokenText: "Masses attract." } } }).ok, true);
   assert.equal(validateGuideSession({ ...base, id: "guide-1", goal: "Find speed", known: ["height"], currentStep: 1, completedSteps: [0], misconceptions: [], hintLevel: 0 }).ok, true);
   assert.equal(validateGuideMessage({ ...base, feedback: "Correct", nextQuestion: "Why?", hint: null, progress: 0.5, isComplete: false }).ok, true);
   assert.equal(validateVisualizationJob({ ...base, id: "job-1", status: "running", stage: "Simulating", createdAt: new Date().toISOString() }).ok, true);

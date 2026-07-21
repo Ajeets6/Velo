@@ -16,7 +16,7 @@ function nonNegativeInteger(value, fallback, name) {
 
 export function loadConfig(env = process.env, root = process.cwd()) {
   const provider = env.VELO_PROVIDER || "local";
-  if (!["local", "ollama"].includes(provider)) throw new VeloError("INVALID_REQUEST", "VELO_PROVIDER must be local or ollama.");
+  if (!["local", "ollama", "openai", "anthropic"].includes(provider)) throw new VeloError("INVALID_REQUEST", "VELO_PROVIDER must be local, ollama, openai, or anthropic.");
   const motionForgeProvider = env.MOTIONFORGE_PROVIDER || "ollama";
   if (!["ollama", "anthropic"].includes(motionForgeProvider)) throw new VeloError("INVALID_REQUEST", "MOTIONFORGE_PROVIDER must be ollama or anthropic.");
   const dataDir = env.VELO_DATA_DIR || path.join(env.LOCALAPPDATA || env.APPDATA || path.join(os.homedir(), ".local", "share"), "Velo");
@@ -25,6 +25,7 @@ export function loadConfig(env = process.env, root = process.cwd()) {
     provider,
     ollamaBaseUrl: env.OLLAMA_BASE_URL || "http://127.0.0.1:11434",
     ollamaModel: env.OLLAMA_MODEL || "llama3.1",
+    providerModel: env.VELO_MODEL || (provider === "ollama" ? (env.OLLAMA_MODEL || "llama3.1") : ""),
     ollamaTimeoutMs: positiveInteger(env.OLLAMA_TIMEOUT_MS, 60000, "OLLAMA_TIMEOUT_MS"),
     projectRoot: root,
     dataDir,

@@ -6,24 +6,27 @@ import os from "node:os";
 import path from "node:path";
 import { AnimationJobManager } from "../backend/job-manager.mjs";
 
-async function withManager(run, overrides = {}) {
+async function withManager(run, overrides = {}, dependencies = {}) {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "velo-jobs-"));
   const children = [];
   const config = { dataDir, databasePath: path.join(dataDir, "velo.sqlite"), rendersRoot: path.join(dataDir, "renders"), motionForgeExecutable: process.execPath, motionForgeModel: "test", renderConcurrency: 1, compileTimeoutMs: 80, simulationTimeoutMs: 80, exportTimeoutMs: 80, cleanupAfterHours: 24, maxRenderBytes: 1000000, ...overrides };
-  const spawnProcess = () => { const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => {}; children.push(child); return child; };
-  const manager = new AnimationJobManager(config, { spawnProcess });
-  try { await run({ manager, config, children }); } finally { try { manager.close(); } catch {} await rm(dataDir, { recursive: true, force: true }); }
+  const commands = [];
+  const spawnProcess = (...args) => { const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => {}; children.push(child); commands.push(args); return child; };
+  const manager = new AnimationJobManager(config, { spawnProcess, ...dependencies });
+  try { await run({ manager, config, children, commands }); } finally { try { manager.close(); } catch {} await rm(dataDir, { recursive: true, force: true }); }
 }
 
 test("queues work, limits concurrency, and starts the next job after completion", async () => withManager(async ({ manager, children, config }) => {
   const first = manager.create("first animation");
   const second = manager.create("second animation");
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(first.status, "running");
   assert.equal(second.status, "queued");
   assert.equal(second.queuePosition, 1);
   const output = path.join(config.rendersRoot, first.id, "animation.mp4");
   await writeFile(output, "video");
   children[0].emit("exit", 0);
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(manager.get(first.id).status, "complete");
   assert.equal(manager.get(second.id).status, "running");
   assert.equal(children.length, 2);
@@ -32,6 +35,7 @@ test("queues work, limits concurrency, and starts the next job after completion"
 test("cancels queued and running jobs idempotently", async () => withManager(async ({ manager, children }) => {
   const running = manager.create("running");
   const queued = manager.create("queued");
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(manager.cancel(queued.id).status, "cancelled");
   assert.equal(manager.cancel(queued.id).status, "cancelled");
   assert.equal(manager.cancel(running.id).status, "cancelled");
@@ -74,3 +78,13 @@ test("cleans expired output only inside the managed render directory", async () 
   manager.cleanup();
   assert.equal(manager.getOutputPath(job.id), null);
 }));
+
+test("cloud render credentials are placed only in the child environment", async () => withManager(async ({ manager, commands }) => {
+  manager.create("cloud render", { provider: "anthropic", model: "claude-test" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const [executable, args, options] = commands[0];
+  assert.equal(executable, process.execPath);
+  assert.deepEqual(args.slice(1, 5), ["--provider", "anthropic", "--model", "claude-test"]);
+  assert.equal(args.includes("anthropic-secret"), false);
+  assert.equal(options.env.ANTHROPIC_API_KEY, "anthropic-secret");
+}, {}, { environmentForProvider: async (provider) => ({ ...process.env, ...(provider === "anthropic" ? { ANTHROPIC_API_KEY: "anthropic-secret" } : {}) }) }));

@@ -14,6 +14,11 @@ import { VeloError, errorPayload, toVeloError } from "./errors.mjs";
 import { AnimationJobManager } from "./job-manager.mjs";
 import { createLogger } from "./logger.mjs";
 import { createProvider } from "./providers.mjs";
+import { credentialStore } from "./credential-store.mjs";
+import { listPublicProviders } from "./provider-registry.mjs";
+import { resolveMotionForgeSelection, resolveTutorSelection } from "./model-selection.mjs";
+import { ModelRequestPayloadStore } from "./model-request-payloads.mjs";
+import { WorkspaceStore } from "./workspace-store.mjs";
 
 async function readJson(request) {
   const chunks = [];
@@ -53,53 +58,108 @@ async function serveVideo(request, response, filePath) {
   return createReadStream(filePath, { start, end }).pipe(response);
 }
 
-export function createVeloServer({ config = loadConfig(), provider = createProvider(config), log = createLogger(), jobManager, motionForge, timelineCache } = {}) {
-  const jobs = jobManager || new AnimationJobManager(config, { log });
-  const explain = new ExplainService(config, { provider, log });
-  const guide = new GuideService(config, { log });
-  const sidecar = motionForge || new MotionForgeSidecar({ executable: config.motionForgeExecutable, startupMs: config.motionForgeStartupMs, log });
-  const timelines = timelineCache || new TimelineCache(config);
-  const providerHealth = { checkedAt: null, result: null };
-  async function refreshProviderHealth() {
-    try { providerHealth.result = await provider.health(); }
-    catch (error) { providerHealth.result = { ok: false, code: toVeloError(error).code }; }
-    providerHealth.checkedAt = new Date().toISOString(); return providerHealth.result;
+export function createVeloServer({ config = loadConfig(), provider, providerFactory = createProvider, credentials = credentialStore, modelRequestPayloadStore, workspaceStore, log = createLogger(), jobManager, motionForge, timelineCache } = {}) {
+  const payloads = modelRequestPayloadStore || new ModelRequestPayloadStore(config);
+  const defaultProvider = provider || providerFactory(config, { payloadStore: payloads });
+  async function environmentForProvider(providerId) {
+    if (providerId !== "anthropic") return process.env;
+    const apiKey = await credentials.get("anthropic");
+    if (!apiKey) throw new VeloError("MODEL_UNAVAILABLE", "Save an API key for Anthropic before using it.", { status: 401 });
+    return { ...process.env, ANTHROPIC_API_KEY: apiKey };
   }
+  async function sidecarEnvironment() {
+    const apiKey = await credentials.get("anthropic");
+    return apiKey ? { ...process.env, ANTHROPIC_API_KEY: apiKey } : process.env;
+  }
+  const jobs = jobManager || new AnimationJobManager(config, { log, environmentForProvider });
+  const explain = new ExplainService(config, { provider: defaultProvider, log });
+  const guide = new GuideService(config, { log });
+  const sidecar = motionForge || new MotionForgeSidecar({ executable: config.motionForgeExecutable, startupMs: config.motionForgeStartupMs, log, environment: sidecarEnvironment });
+  const timelines = timelineCache || new TimelineCache(config);
+  const workspaces = workspaceStore || new WorkspaceStore(config);
+  async function providerFor(selection, supplied = false) {
+    // Preserve an injected provider for the configured default. This keeps the
+    // server testable while still creating a provider for a user-selected model.
+    const defaultModel = config.provider === "local" ? "" : config.provider === "ollama" ? config.ollamaModel : config.providerModel;
+    if (selection.provider === "local" || selection.provider === "ollama") {
+      if (!supplied || (selection.provider === config.provider && selection.model === defaultModel)) return defaultProvider;
+      return providerFactory({ ...config, provider: selection.provider, model: selection.model, ollamaModel: selection.model || config.ollamaModel }, { payloadStore: payloads });
+    }
+    const apiKey = await credentials.get(selection.provider);
+    return providerFactory({ ...config, provider: selection.provider, model: selection.model, ollamaModel: selection.model, apiKey }, { payloadStore: payloads });
+  }
+  function workspaceFor(body, kind, selection) { return workspaces.ensure({ id: body.workspaceId, kind, title: body.prompt || `${kind} workspace`, provider: selection?.provider || "", model: selection?.model || "" }); }
   const server = createServer(async (request, response) => {
     const requestId = randomUUID(); const startedAt = Date.now();
     try {
       const url = new URL(request.url, "http://127.0.0.1");
       if (request.method === "OPTIONS") return send(response, 204, {}, requestId);
-      if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { contractVersion: 1, ok: true, service: "velo-api", provider: provider.name, providerHealth: await refreshProviderHealth(), checkedAt: providerHealth.checkedAt }, requestId);
+      if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { contractVersion: 1, ok: true, service: "velo-api" }, requestId);
+      if (request.method === "GET" && url.pathname === "/api/workspaces") return send(response, 200, { contractVersion: 1, workspaces: workspaces.list(url.searchParams.get("kind") || undefined) }, requestId);
+      if (request.method === "POST" && url.pathname === "/api/workspaces") { const body = await readJson(request); return send(response, 201, workspaces.create(body), requestId); }
+      const workspaceMatch = url.pathname.match(/^\/api\/workspaces\/([0-9a-f-]+)$/i);
+      if (workspaceMatch && request.method === "GET") { const workspace = workspaces.get(workspaceMatch[1]); if (!workspace) throw new VeloError("NOT_FOUND", "Workspace not found."); return send(response, 200, workspace, requestId); }
+      if (workspaceMatch && request.method === "DELETE") { workspaces.remove(workspaceMatch[1]); return send(response, 204, {}, requestId); }
+      if (request.method === "GET" && url.pathname === "/api/settings/providers") return send(response, 200, { contractVersion: 1, providers: listPublicProviders() }, requestId);
+      if (request.method === "GET" && url.pathname === "/api/settings/credentials") { const storage = credentials.status ? await credentials.status() : { available: true }; return send(response, 200, { contractVersion: 1, storage, openai: storage.available ? await credentials.has("openai") : false, anthropic: storage.available ? await credentials.has("anthropic") : false }, requestId); }
+      if (request.method === "POST" && url.pathname === "/api/settings/credentials") { const { provider: credentialProvider, apiKey } = await readJson(request); await credentials.save(credentialProvider, apiKey); return send(response, 204, {}, requestId); }
+      if (request.method === "POST" && url.pathname === "/api/settings/test") { const body = await readJson(request); const selection = resolveTutorSelection(body, config); const testClient = await providerFor(selection, true); await testClient.health(); const result = await testClient.generateText({ prompt: "Reply exactly: OK", mode: "connection-test" }); if (!result.answer?.trim()) throw new VeloError("MODEL_UNAVAILABLE", "The selected model did not return a response."); return send(response, 200, { contractVersion: 1, ok: true, status: "ready", message: "The selected model responded." }, requestId); }
+      const credentialMatch = url.pathname.match(/^\/api\/settings\/credentials\/(openai|anthropic)$/);
+      if (credentialMatch && request.method === "DELETE") { await credentials.remove(credentialMatch[1]); return send(response, 204, {}, requestId); }
       if (request.method === "POST" && url.pathname === "/api/chat") {
-        const { prompt, mode } = requireValid(validateChatRequest(await readJson(request)), "Please enter a physics question between 1 and 2,000 characters.");
+        const body = await readJson(request);
+        const { prompt, mode } = requireValid(validateChatRequest(body), "Please enter a physics question between 1 and 2,000 characters.");
+        const selection = resolveTutorSelection(body, config);
+        const activeProvider = await providerFor(selection, body.provider !== undefined || body.model !== undefined);
         let modelResult;
-        try { modelResult = await provider.generateText({ prompt, mode, requestId }); }
-        catch (error) { if (provider.name !== "ollama") throw error; log("warn", "provider_fallback", { requestId, code: toVeloError(error).code }); modelResult = await createProvider({ provider: "local" }).generateText({ prompt, mode }); }
-        return send(response, 200, { contractVersion: 1, ...modelResult, mode, provider: provider.name, receivedAt: new Date().toISOString() }, requestId);
+        try { modelResult = await activeProvider.generateText({ prompt, mode, requestId }); }
+        catch (error) { if (activeProvider.name !== "ollama") throw error; log("warn", "provider_fallback", { requestId, code: toVeloError(error).code }); modelResult = await createProvider({ provider: "local" }).generateText({ prompt, mode }); }
+        return send(response, 200, { contractVersion: 1, ...modelResult, mode, provider: selection.provider, model: selection.model, receivedAt: new Date().toISOString() }, requestId);
       }
       if (request.method === "POST" && url.pathname === "/api/explain/stream") {
-        const input = requireValid(validateExplainRequest(await readJson(request)), "Please enter a physics question between 1 and 2,000 characters.");
-        const { sessionId, response: explanation } = await explain.create(input);
+        const body = await readJson(request);
+        const input = requireValid(validateExplainRequest(body), "Please enter a physics question between 1 and 2,000 characters.");
+        const selection = resolveTutorSelection(body, config);
+        const workspace = workspaceFor(body, "tutor", selection);
+        const turn = workspaces.appendTurn({ threadId: workspace.id, mode: "explain", prompt: input.prompt });
+        const { sessionId, response: explanation } = await explain.create(input, { provider: await providerFor(selection, body.provider !== undefined || body.model !== undefined) });
+        workspaces.updateTurn(turn.id, { response: explanation, artifact: { explainSessionId: sessionId }, status: "complete" });
         response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "connection": "keep-alive", "x-request-id": requestId });
         const emit = (event, payload) => response.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
-        emit("meta", { contractVersion: 1, sessionId, title: explanation.title, summary: explanation.summary, visualSuggestion: explanation.visualSuggestion });
-        for (const section of explanation.sections) emit("section", section);
+        emit("meta", { contractVersion: 1, sessionId, workspaceId: workspace.id, turnId: turn.id, title: explanation.title, summary: explanation.summary, visualSuggestion: explanation.visualSuggestion, variants: explanation.variants });
+        if (!explanation.variants) for (const section of explanation.sections) emit("section", section);
         emit("complete", { checkQuestion: explanation.checkQuestion, spokenText: explanation.spokenText });
         return response.end();
       }
-      if (request.method === "POST" && url.pathname === "/api/guide/sessions") return send(response, 201, guide.create(requireValid(validateGuideSessionRequest(await readJson(request)), "Please enter a physics problem to guide through.")), requestId);
+      if (request.method === "POST" && url.pathname === "/api/guide/sessions") {
+        const body = await readJson(request);
+        const input = requireValid(validateGuideSessionRequest(body), "Please enter a physics problem to guide through.");
+        const selection = resolveTutorSelection(body, config);
+        const workspace = workspaceFor(body, "tutor", selection);
+        const turn = workspaces.appendTurn({ threadId: workspace.id, mode: "guide", prompt: input.prompt });
+        const session = await guide.create(input, { provider: await providerFor(selection, body.provider !== undefined || body.model !== undefined), selection });
+        workspaces.updateTurn(turn.id, { response: session, artifact: { guideSessionId: session.id }, status: "complete" });
+        return send(response, 201, { ...session, workspaceId: workspace.id, turnId: turn.id }, requestId);
+      }
       const guideMatch = url.pathname.match(/^\/api\/guide\/sessions\/([0-9a-f-]+)$/i);
       if (guideMatch && request.method === "GET") { const session = guide.get(guideMatch[1]); if (!session) throw new VeloError("NOT_FOUND", "Guide session not found."); return send(response, 200, session, requestId); }
       if (guideMatch && request.method === "DELETE") { guide.remove(guideMatch[1]); return send(response, 204, {}, requestId); }
       const guideMessageMatch = url.pathname.match(/^\/api\/guide\/sessions\/([0-9a-f-]+)\/messages$/i);
-      if (guideMessageMatch && request.method === "POST") return send(response, 200, guide.message(guideMessageMatch[1], requireValid(validateGuideMessageRequest(await readJson(request)), "Please enter an answer or choose a guide action.")), requestId);
+      if (guideMessageMatch && request.method === "POST") { const body = await readJson(request); const input = requireValid(validateGuideMessageRequest(body), "Please enter an answer or choose a guide action."); const session = guide.message(guideMessageMatch[1], input); if (body.workspaceId) { const prompt = input.action === "answer" ? input.answer : input.action; const turn = workspaces.appendTurn({ threadId: body.workspaceId, mode: "guide", prompt }); workspaces.updateTurn(turn.id, { response: session, artifact: { guideSessionId: session.id }, status: "complete" }); } return send(response, 200, session, requestId); }
       if (request.method === "POST" && url.pathname === "/api/animations") {
-        const { prompt } = requireValid(validateChatRequest(await readJson(request)), "Please enter an animation prompt between 1 and 2,000 characters.");
-        return send(response, 202, publicJob(jobs.create(prompt)), requestId);
+        const body = await readJson(request);
+        const { prompt } = requireValid(validateChatRequest(body), "Please enter an animation prompt between 1 and 2,000 characters.");
+        const selection = resolveMotionForgeSelection(body, config);
+        const job = publicJob(jobs.create(prompt, selection));
+        return send(response, 202, job, requestId);
       }
       if (request.method === "GET" && url.pathname === "/api/motionforge/health") return send(response, 200, await sidecar.health(), requestId);
-      if (request.method === "POST" && url.pathname === "/api/visualizations") return send(response, 202, await sidecar.request("/v1/visualizations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ contractVersion: 1, ...(await readJson(request)), provider: config.motionForgeProvider, model: config.motionForgeModel, simulationOptions: { recommendedPlaybackFps: 30, recordInspectables: true, detectEvents: true } }) }), requestId);
+      if (request.method === "POST" && url.pathname === "/api/visualizations") {
+        const body = await readJson(request);
+        const selection = resolveMotionForgeSelection(body, config);
+        const payload = await sidecar.request("/v1/visualizations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ contractVersion: 1, ...body, provider: selection.provider, model: selection.model, simulationOptions: { recommendedPlaybackFps: 30, recordInspectables: true, detectEvents: true } }) });
+        return send(response, 202, payload, requestId);
+      }
       const visualizationMatch = url.pathname.match(/^\/api\/visualizations\/([0-9a-f-]+)$/i);
       if (visualizationMatch && request.method === "GET") return send(response, 200, await sidecar.request(`/v1/visualizations/${visualizationMatch[1]}`, { method: "GET" }), requestId);
       if (visualizationMatch && request.method === "DELETE") return send(response, 200, await sidecar.request(`/v1/visualizations/${visualizationMatch[1]}`, { method: "DELETE" }), requestId);
@@ -125,7 +185,7 @@ export function createVeloServer({ config = loadConfig(), provider = createProvi
       return send(response, safe.status, errorPayload(safe, requestId), requestId);
     } finally { log("info", "request_complete", { requestId, method: request.method, pathname: request.url, durationMs: Date.now() - startedAt }); }
   });
-  return { server, config, provider, jobs, explain, guide, sidecar, timelines, refreshProviderHealth, close: () => { jobs.close(); explain.close(); guide.close(); timelines.close(); sidecar.stop(); } };
+  return { server, config, provider: defaultProvider, jobs, explain, guide, sidecar, timelines, payloads, workspaces, close: () => { jobs.close(); explain.close(); guide.close(); timelines.close(); workspaces.close(); sidecar.stop(); } };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
