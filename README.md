@@ -2,11 +2,13 @@
 
 Velo is a local-first physics tutor with a React frontend and a small Node API. It requires no login or API key.
 
-## Development with GPT-5.6
+## Development with GPT-5.6 and Codex
 
-GPT-5.6 was used as an AI development assistant while building Velo. It helped turn product requirements into implementation plans, write and refine the React frontend and Node API, investigate defects, and create and review automated tests. Its suggestions were validated against the repository and the application was tested as part of the normal development workflow.
+GPT-5.6 was used as an AI development assistant while building Velo. It helped turn product requirements into implementation plans, explore design and architecture choices, and reason through defects and testing strategies.
 
-GPT-5.6 is a development aid, not a runtime dependency. Velo still runs locally without a login or API key, and users can independently choose one of the supported model providers for tutoring and visualization features.
+Codex was used alongside GPT-5.6 as a repository-aware coding agent. It inspected the existing codebase, implemented and refined the React frontend and Node API, updated documentation, ran automated tests, and verified changes against the application's actual behavior. AI-generated suggestions and code were reviewed and validated as part of the normal development workflow.
+
+GPT-5.6 and Codex were development aids, not runtime dependencies. Velo still runs locally without a login or API key, and users can independently choose one of the supported model providers for tutoring and visualization features.
 
 ## Run locally
 
